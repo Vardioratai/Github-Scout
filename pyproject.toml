@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "github-scout"
+version = "0.1.0"
+description = "GitHub repository intelligence spider with analytical scoring"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    "httpx[http2]>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.0",
+    "duckdb>=1.1",
+    "polars>=1.5",
+    "tenacity>=8.3",
+    "loguru>=0.7",
+    "typer[all]>=0.12",
+    "rich>=13",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.scripts]
+github-scout = "github_scout.cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["github_scout*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
