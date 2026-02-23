@@ -12,7 +12,8 @@ GitHub Scout crawls GitHub's GraphQL & REST APIs, persists structured repository
 - **REST enrichment** — README quality analysis, contributor counts, release metadata
 - **DuckDB persistence** — embedded columnar database with historical snapshots
 - **Polars scoring pipeline** — multi-factor composite score (0–100) combining star velocity, recency, activity, README quality, and 7-day momentum
-- **Typer CLI** — 5 commands: `crawl`, `score`, `top`, `stats`, `export`
+- **Typer CLI** — 6 commands: `crawl`, `score`, `top`, `stats`, `export`, `clean`
+- **Database maintenance** — flexible `clean` command to purge stale, low-score, archived, or forked repos with dry-run preview
 - **Incremental updates** — delta scraping with upsert logic, preserving original scrape timestamps
 - **Rate-limit aware** — automatic sleep on low remaining quota + tenacity exponential backoff
 
@@ -111,6 +112,52 @@ github-scout export -o results.csv
 github-scout export -o results.parquet
 ```
 
+### 6. Clean / purge data
+
+Remove stale or unwanted repositories from the database. **Dry-run is ON by default** — no data is modified until you pass `--execute`.
+
+```bash
+# Preview what would be deleted (dry-run)
+github-scout clean --archived --forks
+
+# Delete repos scraped before a date
+github-scout clean --before 2026-01-01 --execute
+
+# Delete low-score repos (score < 10 or unscored)
+github-scout clean --score-below 10 --execute
+
+# Delete repos by language
+github-scout clean --language Ruby --execute
+
+# Remove orphan snapshots (no matching repo)
+github-scout clean --orphan-snapshots --execute
+
+# Full purge: truncate repositories, snapshots, and crawl runs
+github-scout clean --all --execute
+
+# Skip confirmation prompt (for CI/automation)
+github-scout clean --archived --execute --yes
+```
+
+Filters can be combined (AND logic):
+
+```bash
+# Archived forks with score below 20
+github-scout clean --archived --forks --score-below 20 --execute
+```
+
+| Flag | Filter |
+|---|---|
+| `--all` | Truncate all three tables |
+| `--before YYYY-MM-DD` | `scraped_at < date` |
+| `--score-below N` | `potential_score < N` or unscored |
+| `--archived` | `is_archived = true` |
+| `--forks` | `is_fork = true` |
+| `--language X` | `primary_language` (case-insensitive) |
+| `--orphan-snapshots` | Snapshots with no matching repo |
+| `--dry-run / --execute` | Preview vs. apply (default: dry-run) |
+| `--yes, -y` | Skip confirmation prompt |
+
 ---
 
 ## 🧮 Scoring Algorithm
@@ -134,7 +181,7 @@ github_scout/
 ├── config/          # Settings + GraphQL queries
 ├── models/          # Pydantic data models
 ├── client/          # httpx async client, rate limiter, paginator
-├── database/        # DuckDB connection, schema DDL, DAO
+├── database/        # DuckDB connection, schema DDL, DAO + clean/purge
 ├── crawler/         # REST enricher + spider orchestrator
 ├── scoring/         # Polars feature engineering + scorer
 ├── analytics/       # SQL query constants

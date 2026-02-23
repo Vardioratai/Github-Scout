@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import duckdb
 from loguru import logger
@@ -16,7 +17,161 @@ __all__: list[str] = [
     "insert_crawl_run",
     "update_crawl_run",
     "repo_exists",
+    "count_repos_matching",
+    "delete_repos",
+    "delete_orphan_snapshots",
+    "count_orphan_snapshots",
 ]
+
+
+# ------------------------------------------------------------------
+# Filter-based cleanup helpers
+# ------------------------------------------------------------------
+
+
+def _build_where_clause(
+    filters: dict[str, Any],
+) -> tuple[str, list[Any]]:
+    """Build a dynamic WHERE clause from *filters*.
+
+    Supported keys (all optional):
+        * ``before``  – ISO-date string  → ``scraped_at < ?``
+        * ``score_below`` – float        → ``potential_score < ? OR potential_score IS NULL``
+        * ``archived``    – bool          → ``is_archived = true``
+        * ``forks``       – bool          → ``is_fork = true``
+        * ``language``    – str           → ``lower(primary_language) = lower(?)``
+
+    Returns:
+        A ``(clause, params)`` tuple.  *clause* is an empty string when no
+        filters are active (caller should guard against this).
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if filters.get("before"):
+        conditions.append(f"scraped_at < ${len(params) + 1}::TIMESTAMPTZ")
+        params.append(filters["before"])
+
+    if filters.get("score_below") is not None:
+        conditions.append(
+            f"(potential_score < ${len(params) + 1} OR potential_score IS NULL)"
+        )
+        params.append(filters["score_below"])
+
+    if filters.get("archived"):
+        conditions.append("is_archived = true")
+
+    if filters.get("forks"):
+        conditions.append("is_fork = true")
+
+    if filters.get("language"):
+        conditions.append(f"lower(primary_language) = lower(${len(params) + 1})")
+        params.append(filters["language"])
+
+    clause = " AND ".join(conditions) if conditions else ""
+    return clause, params
+
+
+def count_repos_matching(
+    conn: duckdb.DuckDBPyConnection,
+    filters: dict[str, Any],
+) -> int:
+    """Return how many repository rows match *filters*.
+
+    Used by the CLI dry-run mode to preview deletions without mutating data.
+    """
+    clause, params = _build_where_clause(filters)
+    if not clause:
+        return 0
+    sql = f"SELECT COUNT(*) FROM repositories WHERE {clause}"
+    row = conn.execute(sql, params).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_orphan_snapshots(conn: duckdb.DuckDBPyConnection) -> int:
+    """Count repo_snapshots rows whose repo_id has no matching repository."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM repo_snapshots "
+        "WHERE repo_id NOT IN (SELECT id FROM repositories)"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def delete_repos(
+    conn: duckdb.DuckDBPyConnection,
+    filters: dict[str, Any],
+) -> tuple[int, int]:
+    """Delete repository rows matching *filters* and cascade to snapshots.
+
+    Args:
+        conn: An open DuckDB connection.
+        filters: Dictionary produced by the CLI (same keys as
+            :func:`_build_where_clause`).  If the ``all_data`` key is truthy
+            the three main tables are truncated entirely.
+
+    Returns:
+        ``(deleted_repos, deleted_snapshots)`` counts.
+    """
+    # ── full purge ────────────────────────────────────────────────
+    if filters.get("all_data"):
+        repo_count = conn.execute("SELECT COUNT(*) FROM repositories").fetchone()
+        snap_count = conn.execute("SELECT COUNT(*) FROM repo_snapshots").fetchone()
+        n_repos = int(repo_count[0]) if repo_count else 0
+        n_snaps = int(snap_count[0]) if snap_count else 0
+
+        conn.execute("DELETE FROM repositories")
+        conn.execute("DELETE FROM repo_snapshots")
+        conn.execute("DELETE FROM crawl_runs")
+        logger.warning(
+            "Full purge: deleted {} repos, {} snapshots, and all crawl_runs.",
+            n_repos,
+            n_snaps,
+        )
+        return n_repos, n_snaps
+
+    # ── filtered delete ───────────────────────────────────────────
+    clause, params = _build_where_clause(filters)
+    if not clause:
+        return 0, 0
+
+    # Count before deleting
+    n_repos = count_repos_matching(conn, filters)
+
+    # Delete repos
+    conn.execute(f"DELETE FROM repositories WHERE {clause}", params)
+
+    # Cascade: remove orphan snapshots
+    n_snaps_row = conn.execute(
+        "SELECT COUNT(*) FROM repo_snapshots "
+        "WHERE repo_id NOT IN (SELECT id FROM repositories)"
+    ).fetchone()
+    n_snaps = int(n_snaps_row[0]) if n_snaps_row else 0
+
+    conn.execute(
+        "DELETE FROM repo_snapshots "
+        "WHERE repo_id NOT IN (SELECT id FROM repositories)"
+    )
+
+    logger.warning(
+        "Filtered delete: removed {} repos and {} orphan snapshots.", n_repos, n_snaps
+    )
+    return n_repos, n_snaps
+
+
+def delete_orphan_snapshots(conn: duckdb.DuckDBPyConnection) -> int:
+    """Delete repo_snapshots with no matching repository row.
+
+    Returns:
+        Number of deleted snapshot rows.
+    """
+    n = count_orphan_snapshots(conn)
+    if n:
+        conn.execute(
+            "DELETE FROM repo_snapshots "
+            "WHERE repo_id NOT IN (SELECT id FROM repositories)"
+        )
+        logger.warning("Deleted {} orphan snapshots.", n)
+    return n
 
 
 def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) -> bool:

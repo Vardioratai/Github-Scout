@@ -263,5 +263,179 @@ def export(
     console.print(f"[green]Exported {len(df)} repos to {output}[/]")
 
 
+# ------------------------------------------------------------------
+# clean
+# ------------------------------------------------------------------
+
+
+@app.command()
+def clean(
+    all_data: bool = typer.Option(
+        False, "--all",
+        help="Truncate repositories, repo_snapshots, and reset crawl_runs",
+    ),
+    before: Optional[str] = typer.Option(
+        None, "--before",
+        help="Delete repos where scraped_at < YYYY-MM-DD (ISO format)",
+    ),
+    score_below: Optional[float] = typer.Option(
+        None, "--score-below",
+        help="Delete repos with potential_score < threshold",
+    ),
+    archived: bool = typer.Option(
+        False, "--archived",
+        help="Delete all repos where is_archived = true",
+    ),
+    forks: bool = typer.Option(
+        False, "--forks",
+        help="Delete all repos where is_fork = true",
+    ),
+    language: Optional[str] = typer.Option(
+        None, "--language",
+        help="Delete repos by primary_language (case-insensitive)",
+    ),
+    orphan_snapshots: bool = typer.Option(
+        False, "--orphan-snapshots",
+        help="Delete repo_snapshots with no matching repository",
+    ),
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--execute",
+        help="Default is dry-run. Use --execute to apply changes.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip confirmation prompt (for automation)",
+    ),
+) -> None:
+    """Clean the DuckDB database by applying one or more filter conditions.
+
+    Dry-run mode is ON by default.  Pass ``--execute`` to apply.
+    Conditions are combined with AND.
+    """
+    from rich.panel import Panel
+
+    from github_scout.database.dao import (
+        count_orphan_snapshots,
+        count_repos_matching,
+        delete_orphan_snapshots,
+        delete_repos,
+    )
+
+    settings = _get_settings()
+    _configure_logging(settings.log_level)
+
+    # --- validate that at least one filter is active -----------------
+    has_filter = any([
+        all_data, before, score_below is not None, archived,
+        forks, language, orphan_snapshots,
+    ])
+    if not has_filter:
+        console.print(
+            "[yellow]No filter specified. "
+            "Use --help to see available options.[/]"
+        )
+        raise typer.Exit(0)
+
+    # --- build filter dict -------------------------------------------
+    filters: dict = {}
+    if all_data:
+        filters["all_data"] = True
+    if before:
+        filters["before"] = before
+    if score_below is not None:
+        filters["score_below"] = score_below
+    if archived:
+        filters["archived"] = True
+    if forks:
+        filters["forks"] = True
+    if language:
+        filters["language"] = language
+
+    with get_connection(settings.db_path) as conn:
+        create_tables(conn)
+
+        # ── compute preview counts ──────────────────────────────────
+        if all_data:
+            row = conn.execute("SELECT COUNT(*) FROM repositories").fetchone()
+            n_repos = int(row[0]) if row else 0
+            row = conn.execute("SELECT COUNT(*) FROM repo_snapshots").fetchone()
+            n_snaps = int(row[0]) if row else 0
+        elif filters:
+            n_repos = count_repos_matching(conn, filters)
+            # estimate snapshots that would become orphaned
+            n_snaps = conn.execute(
+                "SELECT COUNT(*) FROM repo_snapshots rs "
+                "WHERE rs.repo_id IN ("
+                "  SELECT id FROM repositories WHERE "
+                + (
+                    " AND ".join(
+                        c
+                        for c in [
+                            f"scraped_at < '{before}'::TIMESTAMPTZ" if before else "",
+                            f"(potential_score < {score_below} OR potential_score IS NULL)"
+                            if score_below is not None
+                            else "",
+                            "is_archived = true" if archived else "",
+                            "is_fork = true" if forks else "",
+                            f"lower(primary_language) = lower('{language}')"
+                            if language
+                            else "",
+                        ]
+                        if c
+                    )
+                )
+                + ")"
+            ).fetchone()
+            n_snaps = int(n_snaps[0]) if n_snaps else 0
+        else:
+            n_repos = 0
+            n_snaps = 0
+
+        n_orphan = count_orphan_snapshots(conn) if orphan_snapshots else 0
+
+        # ── dry-run: show preview panel ──────────────────────────────
+        if dry_run:
+            lines = ["[bold]Dry-run preview - no data will be modified.[/]\n"]
+            if filters:
+                lines.append(f"  Repositories to delete : [cyan]{n_repos}[/]")
+                lines.append(f"  Cascaded snapshots     : [cyan]{n_snaps}[/]")
+            if orphan_snapshots:
+                lines.append(f"  Orphan snapshots       : [cyan]{n_orphan}[/]")
+            lines.append("\nRe-run with [green]--execute[/] to apply.")
+            console.print(Panel("\n".join(lines), title="Clean Preview", border_style="blue"))
+            return
+
+        # ── execute mode ─────────────────────────────────────────────
+        total_affected = n_repos + n_snaps + n_orphan
+        if total_affected == 0:
+            console.print("[yellow]Nothing to delete - no rows match the filters.[/]")
+            return
+
+        if not yes:
+            console.print(
+                f"\n[red bold]WARNING[/red bold]: This will delete "
+                f"[cyan]{n_repos}[/] repos, [cyan]{n_snaps}[/] cascaded snapshots"
+                + (f", and [cyan]{n_orphan}[/] orphan snapshots" if orphan_snapshots else "")
+                + "."
+            )
+            confirmation = typer.prompt("Type 'confirm' to proceed")
+            if confirmation != "confirm":
+                console.print("[yellow]Aborted.[/]")
+                raise typer.Exit(0)
+
+        # Perform deletions
+        deleted_repos = 0
+        deleted_snaps = 0
+        if filters:
+            deleted_repos, deleted_snaps = delete_repos(conn, filters)
+        if orphan_snapshots:
+            deleted_snaps += delete_orphan_snapshots(conn)
+
+        console.print(
+            f"[green]Done.[/] Deleted [cyan]{deleted_repos}[/] repos "
+            f"and [cyan]{deleted_snaps}[/] snapshots."
+        )
+
+
 if __name__ == "__main__":
     app()
