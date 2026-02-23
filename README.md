@@ -59,7 +59,7 @@ All settings can be overridden via environment variables:
 | `DB_PATH` | `./github_scout.duckdb` | DuckDB database path |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `DEFAULT_QUERY` | `language:python language:"Jupyter Notebook" stars:>100 created:>2026-01-01` | Search query |
-| `MAX_PAGES` | `100` | Max pages to paginate |
+| `MAX_PAGES` | `None` *(unlimited)* | Max pages to paginate (set to cap) |
 | `MAX_CONCURRENT_ENRICHMENTS` | `10` | Concurrent REST enrichment calls |
 
 ---

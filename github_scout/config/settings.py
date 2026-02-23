@@ -46,9 +46,9 @@ class Settings(BaseSettings):
         default=100,
         description="Results per GraphQL search page (max 100)",
     )
-    max_pages: int = Field(
-        default=100,
-        description="Maximum number of pages to paginate",
+    max_pages: int | None = Field(
+        default=None,
+        description="Maximum number of pages to paginate (None = unlimited)",
     )
 
     model_config = SettingsConfigDict(

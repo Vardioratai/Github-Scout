@@ -66,9 +66,9 @@ def crawl(
 
     from github_scout.crawler.spider import run_crawl
 
-    with console.status("[bold green]Crawling GitHub…"):
-        run_model = asyncio.run(run_crawl(settings, query=query, max_pages=max_pages))
+    run_model = asyncio.run(run_crawl(settings, query=query, max_pages=max_pages))
 
+    # Show final summary table
     table = Table(title="Crawl Results")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
@@ -78,6 +78,10 @@ def crawl(
     table.add_row("New repos", str(run_model.repos_new))
     table.add_row("Updated repos", str(run_model.repos_updated))
     table.add_row("Errors", str(run_model.errors_count))
+    if run_model.started_at and run_model.finished_at:
+        delta = run_model.finished_at - run_model.started_at
+        mins, secs = divmod(int(delta.total_seconds()), 60)
+        table.add_row("Duration", f"{mins}m {secs:02d}s")
     console.print(table)
 
 

@@ -1,7 +1,15 @@
-"""Shared async HTTP client for both GraphQL and REST calls."""
+"""Shared async HTTP client for both GraphQL and REST calls.
+
+Retry policy aligned with GitHub API rate-limit documentation:
+  - Transient 5xx and 429 are retried with exponential back-off.
+  - 403 with ``retry-after`` (secondary rate limit) is retried after the
+    indicated delay.
+  - Other 4xx errors are NOT retried (they indicate request problems).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -10,7 +18,7 @@ from loguru import logger
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -19,6 +27,30 @@ from github_scout.client.rate_limiter import check_graphql_rate_limit, check_rat
 from github_scout.config.settings import Settings
 
 __all__: list[str] = ["GitHubClient"]
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True if the exception warrants a retry.
+
+    Retried:
+      - ``httpx.TransportError`` (network-level failures).
+      - 429 Too Many Requests (primary rate limit exceeded).
+      - 403 with ``retry-after`` header (secondary rate limit).
+      - 5xx Server Errors (transient infra problems, e.g. 502).
+    NOT retried:
+      - 400, 401, 404, 422 and other 4xx (client bugs).
+    """
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 429:
+            return True
+        if status == 403 and exc.response.headers.get("retry-after"):
+            return True
+        if status >= 500:
+            return True
+    return False
 
 
 class GitHubClient:
@@ -38,7 +70,7 @@ class GitHubClient:
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            timeout=httpx.Timeout(30.0),
+            timeout=httpx.Timeout(60.0, connect=15.0),
         )
 
     async def close(self) -> None:
@@ -50,10 +82,10 @@ class GitHubClient:
     # ------------------------------------------------------------------
 
     @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
+        wait=wait_exponential(multiplier=2, min=4, max=120),
+        retry=retry_if_exception(_is_retryable),
         before_sleep=before_sleep_log(logger, logging.WARNING),  # type: ignore[arg-type]
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(8),
     )
     async def graphql(
         self,
@@ -70,15 +102,29 @@ class GitHubClient:
             Parsed JSON response body.
 
         Raises:
-            httpx.HTTPStatusError: On 4xx/5xx responses (retried via
-                tenacity for transient errors).
+            httpx.HTTPStatusError: On non-retryable 4xx or exhausted
+                retries for transient errors.
         """
         resp = await self._client.post(
             self._settings.graphql_endpoint,
             json={"query": query, "variables": variables or {}},
         )
+        # If we got a 403/429 with retry-after, handle sleep before raising
+        if resp.status_code in (403, 429):
+            await check_rate_limit(resp)
+            resp.raise_for_status()
         resp.raise_for_status()
         data: dict[str, Any] = resp.json()
+
+        # Check for GraphQL-level errors (can indicate rate limit even on 200)
+        errors = data.get("errors", [])
+        for err in errors:
+            msg = err.get("message", "")
+            if "rate limit" in msg.lower():
+                logger.warning("GraphQL rate-limit error in body: {}", msg)
+                # Force a sleep from the rateLimit block
+                await check_graphql_rate_limit(data.get("data", {}))
+
         await check_graphql_rate_limit(data.get("data", {}))
         return data
 
@@ -87,10 +133,10 @@ class GitHubClient:
     # ------------------------------------------------------------------
 
     @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
+        wait=wait_exponential(multiplier=2, min=4, max=120),
+        retry=retry_if_exception(_is_retryable),
         before_sleep=before_sleep_log(logger, logging.WARNING),  # type: ignore[arg-type]
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(7),
     )
     async def rest_get(
         self,
