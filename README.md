@@ -8,14 +8,16 @@ GitHub Scout crawls GitHub's GraphQL & REST APIs, persists structured repository
 
 ## ✨ Features
 
-- **Paginated GraphQL v4 search** — configurable queries with automatic cursor-based pagination
+- **Paginated GraphQL v4 search** — cursor-based pagination with unlimited page support
+- **Automatic query slicing** — bypasses GitHub's 1,000-result search limit by splitting queries into date-range partitions
 - **REST enrichment** — README quality analysis, contributor counts, release metadata
 - **DuckDB persistence** — embedded columnar database with historical snapshots
 - **Polars scoring pipeline** — multi-factor composite score (0–100) combining star velocity, recency, activity, README quality, and 7-day momentum
 - **Typer CLI** — 6 commands: `crawl`, `score`, `top`, `stats`, `export`, `clean`
 - **Database maintenance** — flexible `clean` command to purge stale, low-score, archived, or forked repos with dry-run preview
 - **Incremental updates** — delta scraping with upsert logic, preserving original scrape timestamps
-- **Rate-limit aware** — automatic sleep on low remaining quota + tenacity exponential backoff
+- **Smart rate-limit handling** — aligned with GitHub's official API policies for both primary and secondary limits
+- **Live progress panel** — real-time Rich dashboard showing pages, repos, quotas, and elapsed time
 
 ---
 
@@ -59,7 +61,7 @@ All settings can be overridden via environment variables:
 | `DB_PATH` | `./github_scout.duckdb` | DuckDB database path |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `DEFAULT_QUERY` | `language:python language:"Jupyter Notebook" stars:>100 created:>2026-01-01` | Search query |
-| `MAX_PAGES` | `None` *(unlimited)* | Max pages to paginate (set to cap) |
+| `MAX_PAGES` | `None` *(unlimited)* | Max pages to paginate per query slice (set to cap) |
 | `MAX_CONCURRENT_ENRICHMENTS` | `10` | Concurrent REST enrichment calls |
 
 ---
@@ -69,11 +71,26 @@ All settings can be overridden via environment variables:
 ### 1. Crawl repositories
 
 ```bash
-# Use default query
+# Use default query (fetches ALL results, auto-slicing if >1,000)
 github-scout crawl
 
 # Custom query with limited pages
 github-scout crawl --query "machine learning stars:>500" --max-pages 5
+```
+
+During the crawl, a **live progress panel** displays real-time status:
+
+```
+┌── Crawling GitHub  language:python stars:>50 created:>2025-01-01...  ──┐
+│                                                                        │
+│  Slice:        3/19          Page:    7 / ~10                          │
+│  Repos found:  2,700         Elapsed: 8m 34s                          │
+│  New:          2,580         Updated: 120                              │
+│  Errors:       0             GraphQL quota: 4,832/5,000 (cost: 1)     │
+│  Status:       Enriching 100 repos (REST)...                           │
+│                              REST quota:    4,215/5,000                │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2. Compute scores
@@ -160,6 +177,65 @@ github-scout clean --archived --forks --score-below 20 --execute
 
 ---
 
+## 🛡️ API Resilience
+
+GitHub Scout implements a multi-layered strategy for dealing with API rate limits and transient errors, aligned with [GitHub's official documentation](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+### Rate-limit handling
+
+| Policy | How it's handled |
+|---|---|
+| **Primary rate limit** (5,000 req/h REST, 5,000 points/h GraphQL) | Preemptive pause when remaining quota drops below 200, sleeping until `x-ratelimit-reset` |
+| **Secondary rate limit** (429/403 with `retry-after`) | Respects the `retry-after` header exactly as GitHub specifies |
+| **GraphQL body errors** | Detects rate-limit errors returned as 200 status with error in JSON body |
+| **Quota visibility** | Live progress panel shows remaining/total for both GraphQL and REST with color-coded status (green → yellow → red) |
+
+### Smart retry logic
+
+The HTTP client uses **tenacity** with a custom retry predicate that only retries transient errors:
+
+| Error type | Retried? | Reason |
+|---|---|---|
+| `429 Too Many Requests` | ✅ | Primary rate limit exceeded |
+| `403` with `retry-after` header | ✅ | Secondary rate limit |
+| `5xx` (502 Bad Gateway, etc.) | ✅ | Transient server errors |
+| `TransportError` (network) | ✅ | Connection issues |
+| `400`, `401`, `404`, `422` | ❌ | Client bugs — retrying won't help |
+
+Retry configuration:
+- **GraphQL**: up to 8 attempts, exponential backoff 4s → 120s (multiplier × 2)
+- **REST**: up to 7 attempts, same backoff strategy
+- **Per-page retry**: up to 3 consecutive same-cursor retries with 30s delay
+
+### Automatic query slicing (1,000-result bypass)
+
+GitHub's Search API returns **at most 1,000 results** per query, regardless of pagination. When a query matches more results, the spider:
+
+1. **Probes** the query to get `repositoryCount`
+2. **Splits** the date range into slices, each sized to return <1,000 results
+3. **Iterates** each slice independently, accumulating all repos
+
+```
+Query: language:python stars:>50 created:>2025-01-01
+Total: 13,000 results → 19 date slices (~23 days each)
+
+Slice  1: language:python stars:>50 created:2025-01-02..2025-01-24
+Slice  2: language:python stars:>50 created:2025-01-25..2025-02-16
+...
+Slice 19: language:python stars:>50 created:2026-02-20..2026-02-24
+```
+
+Supported `created:` qualifier formats:
+
+| Format | Example |
+|---|---|
+| `created:>YYYY-MM-DD` | `created:>2025-01-01` |
+| `created:>=YYYY-MM-DD` | `created:>=2025-01-01` |
+| `created:START..END` | `created:2025-01-01..2025-06-30` |
+| *(no created qualifier)* | Uses full range 2008-01-01 to today |
+
+---
+
 ## 🧮 Scoring Algorithm
 
 The **potential score** (0–100) is a weighted composite of:
@@ -182,11 +258,22 @@ github_scout/
 ├── models/          # Pydantic data models
 ├── client/          # httpx async client, rate limiter, paginator
 ├── database/        # DuckDB connection, schema DDL, DAO + clean/purge
-├── crawler/         # REST enricher + spider orchestrator
+├── crawler/         # REST enricher, spider orchestrator, query slicer
 ├── scoring/         # Polars feature engineering + scorer
 ├── analytics/       # SQL query constants
 └── cli/             # Typer CLI entry point
 ```
+
+### Key modules
+
+| Module | Purpose |
+|---|---|
+| `client/github_client.py` | Async HTTP client with tenacity retry and rate-limit awareness |
+| `client/rate_limiter.py` | Primary + secondary rate-limit handling per GitHub's docs |
+| `client/paginator.py` | Cursor-based GraphQL pagination + probe helper |
+| `crawler/query_slicer.py` | Date-range partitioning to bypass 1,000-result cap |
+| `crawler/spider.py` | Crawl orchestrator with Rich live progress panel |
+| `crawler/enricher.py` | REST-based README, contributor, and release enrichment |
 
 ### Database Tables
 
