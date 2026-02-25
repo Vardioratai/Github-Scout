@@ -1,10 +1,15 @@
 """Crawl orchestrator - ties paginator, enricher, and persistence together.
 
 Provides a live Rich progress display showing:
-  - Pages fetched / total estimated
+  - Current date slice and page within it
   - Repos found, new, updated, errors
   - GraphQL & REST rate-limit quota remaining
   - Elapsed time
+
+When the GitHub Search API returns more than 1,000 results for a query
+(its hard cap), the spider automatically partitions the query into
+date-range slices, each staying under 1,000, so that every matching
+repository is retrieved.
 """
 
 from __future__ import annotations
@@ -21,10 +26,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from github_scout.client.github_client import GitHubClient
-from github_scout.client.paginator import paginate_search
+from github_scout.client.paginator import paginate_search, probe_query_count
 from github_scout.client.rate_limiter import last_rest_rate
 from github_scout.config.settings import Settings
 from github_scout.crawler.enricher import enrich_repos
+from github_scout.crawler.query_slicer import generate_query_slices
 from github_scout.database.connection import get_connection
 from github_scout.database.dao import (
     insert_crawl_run,
@@ -54,6 +60,8 @@ def _format_elapsed(seconds: float) -> str:
 
 def _build_status_table(
     *,
+    slice_num: int,
+    total_slices: int,
     page_num: int,
     total_matches: int,
     repos_found: int,
@@ -76,17 +84,18 @@ def _build_status_table(
     table.add_column("Label2", style="cyan", no_wrap=True)
     table.add_column("Value2", style="white")
 
-    # Row 1: Pages and time
+    # Row 1: Slice, page and time
+    slice_str = f"{slice_num}/{total_slices}" if total_slices > 1 else "-"
     pages_est = max(1, (total_matches + 99) // 100) if total_matches else "?"
     table.add_row(
+        "Slice:", slice_str,
         "Page:", f"{page_num} / ~{pages_est}",
-        "Elapsed:", _format_elapsed(elapsed),
     )
 
-    # Row 2: Repos
+    # Row 2: Repos and time
     table.add_row(
         "Repos found:", f"[bold green]{repos_found}[/]",
-        "Total matches:", f"{total_matches:,}" if total_matches else "?",
+        "Elapsed:", _format_elapsed(elapsed),
     )
 
     # Row 3: New / Updated
@@ -95,7 +104,7 @@ def _build_status_table(
         "Updated:", f"[yellow]{repos_updated}[/]",
     )
 
-    # Row 4: Errors and quota
+    # Row 4: Errors and GraphQL quota
     err_style = "[red]" if errors > 0 else "[dim]"
     if gql_remaining is not None and gql_limit is not None:
         gql_str = f"{gql_remaining:,}/{gql_limit:,}"
@@ -109,7 +118,7 @@ def _build_status_table(
         "GraphQL quota:", f"[{gql_color}]{gql_str}[/] (cost: {gql_cost or '?'})",
     )
 
-    # Row 5: REST quota
+    # Row 5: Status and REST quota
     if rest_remaining is not None and rest_limit is not None:
         rest_str = f"{rest_remaining:,}/{rest_limit:,}"
     else:
@@ -138,6 +147,10 @@ async def run_crawl(
 ) -> CrawlRunModel:
     """Execute a full crawl cycle: paginate -> enrich -> persist.
 
+    When the query matches more than 1,000 repositories (GitHub's search
+    API hard cap), the query is automatically sliced into date-range
+    partitions so that every result is fetched.
+
     Args:
         settings: Application configuration.
         query: Override search query.
@@ -149,21 +162,24 @@ async def run_crawl(
     if max_pages is not None:
         settings = settings.model_copy(update={"max_pages": max_pages})
 
+    search_query = query or settings.default_query
+
     run = CrawlRunModel(
         run_id=uuid.uuid4().hex[:12],
-        query_string=query or settings.default_query,
+        query_string=search_query,
         started_at=datetime.now(tz=timezone.utc),
         status="running",
     )
 
     client = GitHubClient(settings)
 
-    # Shared state dict for rate-limit tracking between paginator & spider
+    # Progress state
     rate_state: dict[str, Any] = {}
     page_num = 0
-    status_msg = "Initializing..."
+    slice_num = 0
+    total_slices = 1
+    status_msg = "Probing query..."
     start_time = monotonic()
-    search_query = query or settings.default_query
 
     with get_connection(settings.db_path) as conn:
         create_tables(conn)
@@ -174,6 +190,8 @@ async def run_crawl(
             def _refresh() -> None:
                 live.update(
                     _build_status_table(
+                        slice_num=slice_num,
+                        total_slices=total_slices,
                         page_num=page_num,
                         total_matches=rate_state.get("total_matches", 0),
                         repos_found=run.repos_found,
@@ -194,76 +212,125 @@ async def run_crawl(
             _refresh()
 
             try:
+                # ----- Step 1: Probe total result count --------------------
+                total_count = await probe_query_count(client, search_query)
+                status_msg = f"Total results: {total_count:,}"
+                _refresh()
+
+                # ----- Step 2: Generate query slices if needed -------------
+                sub_queries = generate_query_slices(search_query, total_count)
+                total_slices = len(sub_queries)
+
+                if total_slices > 1:
+                    console.print(
+                        f"  [bold cyan]>> Query has {total_count:,} results "
+                        f"(exceeds 1,000 limit). "
+                        f"Split into {total_slices} date slices.[/]"
+                    )
+
+                # ----- Step 3: Iterate slices ------------------------------
                 consecutive_failures = 0
                 max_consecutive_failures = 3
 
-                async for page_nodes in paginate_search(
-                    client, settings, query, rate_state=rate_state,
-                ):
-                    try:
-                        page_num += 1
-                        status_msg = f"Processing page {page_num}..."
-                        _refresh()
+                for idx, sub_q in enumerate(sub_queries, 1):
+                    slice_num = idx
+                    page_num = 0
+                    status_msg = (
+                        f"Slice {slice_num}/{total_slices}: starting..."
+                    )
+                    _refresh()
 
-                        # Parse GraphQL nodes into models
-                        repos: list[RepositoryModel] = []
-                        for node in page_nodes:
-                            try:
-                                repos.append(RepositoryModel.from_graphql(node))
-                            except Exception as exc:
-                                logger.warning("Skipping malformed node: {}", exc)
-                                run.errors_count += 1
-
-                        status_msg = f"Enriching {len(repos)} repos (REST)..."
-                        _refresh()
-
-                        # Enrich with REST data
-                        await enrich_repos(client, settings, repos)
-
-                        status_msg = f"Persisting {len(repos)} repos..."
-                        _refresh()
-
-                        # Persist
-                        for repo in repos:
-                            try:
-                                is_new = upsert_repository(conn, repo)
-                                insert_snapshot(conn, repo)
-                                if is_new:
-                                    run.repos_new += 1
-                                else:
-                                    run.repos_updated += 1
-                                run.repos_found += 1
-                            except Exception as exc:
-                                logger.error(
-                                    "Failed to persist {}: {}", repo.full_name, exc,
-                                )
-                                run.errors_count += 1
-
-                        # Reset consecutive failure counter on success
-                        consecutive_failures = 0
-                        status_msg = "Waiting for next page..."
-                        _refresh()
-
-                    except Exception as page_exc:
-                        consecutive_failures += 1
-                        run.errors_count += 1
-                        status_msg = (
-                            f"Page error ({consecutive_failures}/"
-                            f"{max_consecutive_failures})"
+                    if total_slices > 1:
+                        logger.info(
+                            "Slice {}/{}: {}", slice_num, total_slices, sub_q,
                         )
-                        _refresh()
-                        logger.error(
-                            "Page processing failed ({}/{}): {}",
-                            consecutive_failures,
-                            max_consecutive_failures,
-                            page_exc,
-                        )
-                        if consecutive_failures >= max_consecutive_failures:
-                            logger.error(
-                                "Aborting crawl after {} consecutive page failures.",
-                                max_consecutive_failures,
+
+                    async for page_nodes in paginate_search(
+                        client, settings, sub_q, rate_state=rate_state,
+                    ):
+                        try:
+                            page_num += 1
+                            status_msg = (
+                                f"Slice {slice_num}/{total_slices} "
+                                f"- page {page_num}..."
                             )
-                            break
+                            _refresh()
+
+                            # Parse GraphQL nodes into models
+                            repos: list[RepositoryModel] = []
+                            for node in page_nodes:
+                                try:
+                                    repos.append(
+                                        RepositoryModel.from_graphql(node),
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Skipping malformed node: {}", exc,
+                                    )
+                                    run.errors_count += 1
+
+                            status_msg = (
+                                f"Enriching {len(repos)} repos (REST)..."
+                            )
+                            _refresh()
+
+                            # Enrich with REST data
+                            await enrich_repos(client, settings, repos)
+
+                            status_msg = (
+                                f"Persisting {len(repos)} repos..."
+                            )
+                            _refresh()
+
+                            # Persist
+                            for repo in repos:
+                                try:
+                                    is_new = upsert_repository(conn, repo)
+                                    insert_snapshot(conn, repo)
+                                    if is_new:
+                                        run.repos_new += 1
+                                    else:
+                                        run.repos_updated += 1
+                                    run.repos_found += 1
+                                except Exception as exc:
+                                    logger.error(
+                                        "Failed to persist {}: {}",
+                                        repo.full_name, exc,
+                                    )
+                                    run.errors_count += 1
+
+                            consecutive_failures = 0
+                            status_msg = "Waiting for next page..."
+                            _refresh()
+
+                        except Exception as page_exc:
+                            consecutive_failures += 1
+                            run.errors_count += 1
+                            status_msg = (
+                                f"Page error ({consecutive_failures}/"
+                                f"{max_consecutive_failures})"
+                            )
+                            _refresh()
+                            logger.error(
+                                "Page processing failed ({}/{}): {}",
+                                consecutive_failures,
+                                max_consecutive_failures,
+                                page_exc,
+                            )
+                            if consecutive_failures >= max_consecutive_failures:
+                                logger.error(
+                                    "Aborting crawl after {} consecutive "
+                                    "page failures.",
+                                    max_consecutive_failures,
+                                )
+                                break
+
+                    # Log slice summary
+                    if total_slices > 1:
+                        logger.info(
+                            "Slice {}/{} done. Running total: {} repos.",
+                            slice_num, total_slices, run.repos_found,
+                        )
 
                 run.status = "completed"
                 status_msg = "Completed!"

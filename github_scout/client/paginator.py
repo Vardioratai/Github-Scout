@@ -18,7 +18,7 @@ from github_scout.client.github_client import GitHubClient
 from github_scout.config.graphql_queries import SEARCH_REPOS_QUERY
 from github_scout.config.settings import Settings
 
-__all__: list[str] = ["paginate_search"]
+__all__: list[str] = ["paginate_search", "probe_query_count"]
 
 console = Console()
 
@@ -133,3 +133,34 @@ async def paginate_search(
             break
 
         cursor = page_info.get("endCursor")
+
+
+# ------------------------------------------------------------------
+# Probe helper
+# ------------------------------------------------------------------
+
+_PROBE_QUERY: str = """
+query ProbeCount($q: String!) {
+  search(query: $q, type: REPOSITORY, first: 1) {
+    repositoryCount
+  }
+  rateLimit { remaining resetAt cost }
+}
+"""
+
+
+async def probe_query_count(client: GitHubClient, query: str) -> int:
+    """Return the total ``repositoryCount`` for *query* with a single request.
+
+    This is used to decide whether query slicing is needed before starting
+    the full pagination cycle.
+    """
+    response = await client.graphql(_PROBE_QUERY, {"q": query})
+    count = (
+        response
+        .get("data", {})
+        .get("search", {})
+        .get("repositoryCount", 0)
+    )
+    logger.info("Probe: query has {:,} total results.", count)
+    return count
