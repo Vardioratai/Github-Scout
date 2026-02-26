@@ -17,6 +17,9 @@ __all__: list[str] = [
     "insert_crawl_run",
     "update_crawl_run",
     "repo_exists",
+    "get_repo_freshness",
+    "lightweight_update_repo",
+    "should_take_snapshot",
     "count_repos_matching",
     "delete_repos",
     "delete_orphan_snapshots",
@@ -296,6 +299,103 @@ def repo_exists(conn: duckdb.DuckDBPyConnection, repo_id: str) -> bool:
     return result is not None
 
 
+# ------------------------------------------------------------------
+# Smart-refresh helpers
+# ------------------------------------------------------------------
+
+
+def get_repo_freshness(
+    conn: duckdb.DuckDBPyConnection,
+    repo_id: str,
+) -> tuple[datetime, datetime] | None:
+    """Return ``(updated_in_db_at, scraped_at)`` for a repository, or ``None``.
+
+    Used by the spider to decide between full enrichment and lightweight
+    update based on TTL.
+
+    Args:
+        conn: An open DuckDB connection.
+        repo_id: The GitHub node ID.
+
+    Returns:
+        A 2-tuple of timestamps, or ``None`` if the repo is not in the DB.
+    """
+    row = conn.execute(
+        "SELECT updated_in_db_at, scraped_at FROM repositories WHERE id = $1",
+        [repo_id],
+    ).fetchone()
+    if row is None:
+        return None
+    return (row[0], row[1])
+
+
+def lightweight_update_repo(
+    conn: duckdb.DuckDBPyConnection,
+    repo: RepositoryModel,
+) -> None:
+    """Update only volatile metrics — no REST enrichment fields touched.
+
+    Updates: ``stars``, ``forks``, ``open_issues``, ``pushed_at``,
+    ``updated_at``, and ``updated_in_db_at``.
+
+    Args:
+        conn: An open DuckDB connection.
+        repo: Repository model with fresh GraphQL data.
+    """
+    now = datetime.now(tz=timezone.utc).isoformat()
+    conn.execute(
+        """
+        UPDATE repositories SET
+            stars            = $2,
+            forks            = $3,
+            open_issues      = $4,
+            pushed_at        = $5,
+            updated_at       = $6,
+            updated_in_db_at = $7
+        WHERE id = $1
+        """,
+        [
+            repo.id,
+            repo.stars,
+            repo.forks,
+            repo.open_issues,
+            repo.pushed_at.isoformat() if repo.pushed_at else None,
+            repo.updated_at.isoformat() if repo.updated_at else None,
+            now,
+        ],
+    )
+
+
+def should_take_snapshot(
+    conn: duckdb.DuckDBPyConnection,
+    repo_id: str,
+    ttl_hours: int,
+) -> bool:
+    """Return ``True`` if the latest snapshot is older than *ttl_hours*.
+
+    Also returns ``True`` when no snapshot exists at all.
+
+    Args:
+        conn: An open DuckDB connection.
+        repo_id: The GitHub node ID.
+        ttl_hours: Minimum hours between snapshots.
+
+    Returns:
+        Whether a new snapshot should be taken.
+    """
+    row = conn.execute(
+        "SELECT MAX(snapshot_at) FROM repo_snapshots WHERE repo_id = $1",
+        [repo_id],
+    ).fetchone()
+    if row is None or row[0] is None:
+        return True
+    last_snapshot: datetime = row[0]
+    age_hours = (
+        datetime.now(tz=timezone.utc) - last_snapshot.replace(tzinfo=timezone.utc)
+    ).total_seconds() / 3600
+    return age_hours >= ttl_hours
+
+
 def insert_crawl_run(
     conn: duckdb.DuckDBPyConnection,
     run: CrawlRunModel,
@@ -310,8 +410,10 @@ def insert_crawl_run(
         """
         INSERT INTO crawl_runs (
             run_id, query_string, started_at, finished_at,
-            repos_found, repos_new, repos_updated, errors_count, status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            repos_found, repos_new, repos_updated,
+            repos_refreshed, repos_skipped_fresh, snapshots_taken,
+            errors_count, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         """,
         [
             run.run_id,
@@ -321,6 +423,9 @@ def insert_crawl_run(
             run.repos_found,
             run.repos_new,
             run.repos_updated,
+            run.repos_refreshed,
+            run.repos_skipped_fresh,
+            run.snapshots_taken,
             run.errors_count,
             run.status,
         ],
@@ -341,12 +446,15 @@ def update_crawl_run(
     conn.execute(
         """
         UPDATE crawl_runs SET
-            finished_at   = $2,
-            repos_found   = $3,
-            repos_new     = $4,
-            repos_updated = $5,
-            errors_count  = $6,
-            status        = $7
+            finished_at         = $2,
+            repos_found         = $3,
+            repos_new           = $4,
+            repos_updated       = $5,
+            repos_refreshed     = $6,
+            repos_skipped_fresh = $7,
+            snapshots_taken     = $8,
+            errors_count        = $9,
+            status              = $10
         WHERE run_id = $1
         """,
         [
@@ -355,6 +463,9 @@ def update_crawl_run(
             run.repos_found,
             run.repos_new,
             run.repos_updated,
+            run.repos_refreshed,
+            run.repos_skipped_fresh,
+            run.snapshots_taken,
             run.errors_count,
             run.status,
         ],

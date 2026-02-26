@@ -19,5 +19,8 @@ class CrawlRunModel(BaseModel):
     repos_found: int = 0
     repos_new: int = 0
     repos_updated: int = 0
+    repos_refreshed: int = 0
+    repos_skipped_fresh: int = 0
+    snapshots_taken: int = 0
     errors_count: int = 0
     status: str = Field(default="running", pattern=r"^(running|completed|failed)$")

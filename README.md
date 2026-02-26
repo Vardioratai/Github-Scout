@@ -15,6 +15,7 @@ GitHub Scout crawls GitHub's GraphQL & REST APIs, persists structured repository
 - **Polars scoring pipeline** — multi-factor composite score (0–100) combining star velocity, recency, activity, README quality, and 7-day momentum
 - **Typer CLI** — 6 commands: `crawl`, `score`, `top`, `stats`, `export`, `clean`
 - **Database maintenance** — flexible `clean` command to purge stale, low-score, archived, or forked repos with dry-run preview
+- **Smart re-crawl** — TTL-based three-tier strategy: skip enrichment for fresh repos, re-enrich stale ones, and always insert new repos; saves API quota dramatically
 - **Incremental updates** — delta scraping with upsert logic, preserving original scrape timestamps
 - **Smart rate-limit handling** — aligned with GitHub's official API policies for both primary and secondary limits
 - **Live progress panel** — real-time Rich dashboard showing pages, repos, quotas, and elapsed time
@@ -63,6 +64,9 @@ All settings can be overridden via environment variables:
 | `DEFAULT_QUERY` | `language:python language:"Jupyter Notebook" stars:>100 created:>2026-01-01` | Search query |
 | `MAX_PAGES` | `None` *(unlimited)* | Max pages to paginate per query slice (set to cap) |
 | `MAX_CONCURRENT_ENRICHMENTS` | `10` | Concurrent REST enrichment calls |
+| `REFRESH_TTL_HOURS` | `24` | Hours before a repo is considered stale and re-enriched |
+| `SNAPSHOT_TTL_HOURS` | `6` | Minimum hours between snapshots (avoids spam) |
+| `FORCE_REFRESH` | `false` | Force full re-enrichment on all repos regardless of TTL |
 
 ---
 
@@ -76,6 +80,12 @@ github-scout crawl
 
 # Custom query with limited pages
 github-scout crawl --query "machine learning stars:>500" --max-pages 5
+
+# Force re-enrichment for all repos (ignore TTL)
+github-scout crawl --force-refresh
+
+# Set a custom TTL (re-enrich repos older than 12 hours)
+github-scout crawl --refresh-ttl 12
 ```
 
 During the crawl, a **live progress panel** displays real-time status:
@@ -85,13 +95,41 @@ During the crawl, a **live progress panel** displays real-time status:
 │                                                                        │
 │  Slice:        3/19          Page:    7 / ~10                          │
 │  Repos found:  2,700         Elapsed: 8m 34s                          │
-│  New:          2,580         Updated: 120                              │
+│  🆕 New:       2,580         🔄 Refreshed: 18                         │
+│  ⏩ Skipped:   102           📸 Snapshots: 2,698                      │
 │  Errors:       0             GraphQL quota: 4,832/5,000 (cost: 1)     │
 │  Status:       Enriching 100 repos (REST)...                           │
 │                              REST quota:    4,215/5,000                │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+After crawl completion, a **summary panel** is displayed:
+
+```
+╭─── Crawl Summary ────────────────────────────╮
+│  🆕 New repos:          42                   │
+│  🔄 Refreshed (stale):  18                   │
+│  ⏩ Skipped (fresh):    95                   │
+│  📸 Snapshots taken:    60                   │
+│  ❌ Errors:             2                    │
+│  ⏱  Duration:           47.3s                │
+╰──────────────────────────────────────────────╯
+```
+
+#### Smart Re-crawl Strategy
+
+On re-crawl, each repository is classified into one of three tiers:
+
+| Tier | Condition | Action | REST calls |
+|---|---|---|---|
+| **🆕 NEW** | Not in DB | Full enrichment + insert + snapshot | ✅ Yes |
+| **🔄 REFRESH** | In DB, older than `REFRESH_TTL_HOURS` | Full re-enrichment + upsert + snapshot | ✅ Yes |
+| **⏩ SKIP-ENRICH** | In DB, fresher than `REFRESH_TTL_HOURS` | Lightweight update (stars, forks, issues only) + conditional snapshot | ❌ No |
+
+Snapshots in the SKIP-ENRICH tier are only taken if the last snapshot is older than `SNAPSHOT_TTL_HOURS`, avoiding snapshot spam.
+
+Use `--force-refresh` to override TTL and re-enrich all repos.
 
 ### 2. Compute scores
 

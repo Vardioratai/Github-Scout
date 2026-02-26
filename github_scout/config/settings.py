@@ -50,6 +50,18 @@ class Settings(BaseSettings):
         default=None,
         description="Maximum number of pages to paginate (None = unlimited)",
     )
+    refresh_ttl_hours: int = Field(
+        default=24,
+        description="Hours before a repo is considered stale for re-enrichment",
+    )
+    snapshot_ttl_hours: int = Field(
+        default=6,
+        description="Minimum hours between repo snapshots (avoids snapshot spam)",
+    )
+    force_refresh: bool = Field(
+        default=False,
+        description="Force full re-enrichment on all repos regardless of TTL",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

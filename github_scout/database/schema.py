@@ -62,21 +62,34 @@ CREATE TABLE IF NOT EXISTS repo_snapshots (
 
 CRAWL_RUNS_DDL: str = """
 CREATE TABLE IF NOT EXISTS crawl_runs (
-    run_id         VARCHAR PRIMARY KEY,
-    query_string   VARCHAR,
-    started_at     TIMESTAMPTZ,
-    finished_at    TIMESTAMPTZ,
-    repos_found    INTEGER DEFAULT 0,
-    repos_new      INTEGER DEFAULT 0,
-    repos_updated  INTEGER DEFAULT 0,
-    errors_count   INTEGER DEFAULT 0,
-    status         VARCHAR
+    run_id              VARCHAR PRIMARY KEY,
+    query_string        VARCHAR,
+    started_at          TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ,
+    repos_found         INTEGER DEFAULT 0,
+    repos_new           INTEGER DEFAULT 0,
+    repos_updated       INTEGER DEFAULT 0,
+    repos_refreshed     INTEGER DEFAULT 0,
+    repos_skipped_fresh INTEGER DEFAULT 0,
+    snapshots_taken     INTEGER DEFAULT 0,
+    errors_count        INTEGER DEFAULT 0,
+    status              VARCHAR
 );
 """
 
 
+# Migration helpers — add columns that may be missing in older databases.
+_CRAWL_RUNS_MIGRATIONS: list[str] = [
+    "ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS repos_refreshed INTEGER DEFAULT 0",
+    "ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS repos_skipped_fresh INTEGER DEFAULT 0",
+    "ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS snapshots_taken INTEGER DEFAULT 0",
+]
+
+
 def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Execute all DDL statements to ensure schema exists.
+
+    Also applies lightweight migrations for columns added in newer versions.
 
     Args:
         conn: An open DuckDB connection.
@@ -84,3 +97,7 @@ def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(REPOSITORIES_DDL)
     conn.execute(REPO_SNAPSHOTS_DDL)
     conn.execute(CRAWL_RUNS_DDL)
+
+    # Apply migrations for existing tables
+    for stmt in _CRAWL_RUNS_MIGRATIONS:
+        conn.execute(stmt)

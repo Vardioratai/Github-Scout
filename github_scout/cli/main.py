@@ -59,30 +59,31 @@ def _configure_logging(level: str) -> None:
 def crawl(
     query: Optional[str] = typer.Option(None, "--query", "-q", help="Search query override"),
     max_pages: Optional[int] = typer.Option(None, "--max-pages", "-p", help="Max pages to fetch"),
+    force_refresh: bool = typer.Option(
+        False, "--force-refresh",
+        help="Re-fetch and re-enrich all repos regardless of TTL",
+    ),
+    refresh_ttl: Optional[int] = typer.Option(
+        None, "--refresh-ttl",
+        help="Hours before a repo is considered stale (default: 24)",
+    ),
 ) -> None:
     """Crawl GitHub for repositories matching the search query."""
     settings = _get_settings()
     _configure_logging(settings.log_level)
 
+    # Apply CLI overrides to settings
+    overrides: dict = {}
+    if force_refresh:
+        overrides["force_refresh"] = True
+    if refresh_ttl is not None:
+        overrides["refresh_ttl_hours"] = refresh_ttl
+    if overrides:
+        settings = settings.model_copy(update=overrides)
+
     from github_scout.crawler.spider import run_crawl
 
-    run_model = asyncio.run(run_crawl(settings, query=query, max_pages=max_pages))
-
-    # Show final summary table
-    table = Table(title="Crawl Results")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-    table.add_row("Run ID", run_model.run_id)
-    table.add_row("Status", run_model.status)
-    table.add_row("Repos found", str(run_model.repos_found))
-    table.add_row("New repos", str(run_model.repos_new))
-    table.add_row("Updated repos", str(run_model.repos_updated))
-    table.add_row("Errors", str(run_model.errors_count))
-    if run_model.started_at and run_model.finished_at:
-        delta = run_model.finished_at - run_model.started_at
-        mins, secs = divmod(int(delta.total_seconds()), 60)
-        table.add_row("Duration", f"{mins}m {secs:02d}s")
-    console.print(table)
+    asyncio.run(run_crawl(settings, query=query, max_pages=max_pages))
 
 
 # ------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Provides a live Rich progress display showing:
   - Current date slice and page within it
-  - Repos found, new, updated, errors
+  - Repos found, new, refreshed, skipped, errors
   - GraphQL & REST rate-limit quota remaining
   - Elapsed time
 
@@ -10,6 +10,11 @@ When the GitHub Search API returns more than 1,000 results for a query
 (its hard cap), the spider automatically partitions the query into
 date-range slices, each staying under 1,000, so that every matching
 repository is retrieved.
+
+Smart re-crawl strategy:
+  CASE A — NEW:          repo not in DB → full enrichment + insert + snapshot
+  CASE B — REFRESH:      repo in DB but stale → full re-enrichment + upsert + snapshot
+  CASE C — SKIP-ENRICH:  repo in DB and fresh → lightweight update + conditional snapshot
 """
 
 from __future__ import annotations
@@ -33,8 +38,11 @@ from github_scout.crawler.enricher import enrich_repos
 from github_scout.crawler.query_slicer import generate_query_slices
 from github_scout.database.connection import get_connection
 from github_scout.database.dao import (
+    get_repo_freshness,
     insert_crawl_run,
     insert_snapshot,
+    lightweight_update_repo,
+    should_take_snapshot,
     update_crawl_run,
     upsert_repository,
 )
@@ -67,6 +75,9 @@ def _build_status_table(
     repos_found: int,
     repos_new: int,
     repos_updated: int,
+    repos_refreshed: int,
+    repos_skipped_fresh: int,
+    snapshots_taken: int,
     errors: int,
     gql_remaining: int | None,
     gql_limit: int | None,
@@ -98,13 +109,19 @@ def _build_status_table(
         "Elapsed:", _format_elapsed(elapsed),
     )
 
-    # Row 3: New / Updated
+    # Row 3: New / Refreshed
     table.add_row(
-        "New:", f"[green]{repos_new}[/]",
-        "Updated:", f"[yellow]{repos_updated}[/]",
+        "🆕 New:", f"[green]{repos_new}[/]",
+        "🔄 Refreshed:", f"[yellow]{repos_refreshed}[/]",
     )
 
-    # Row 4: Errors and GraphQL quota
+    # Row 4: Skipped / Snapshots
+    table.add_row(
+        "⏩ Skipped:", f"[dim]{repos_skipped_fresh}[/]",
+        "📸 Snapshots:", f"[cyan]{snapshots_taken}[/]",
+    )
+
+    # Row 5: Errors and GraphQL quota
     err_style = "[red]" if errors > 0 else "[dim]"
     if gql_remaining is not None and gql_limit is not None:
         gql_str = f"{gql_remaining:,}/{gql_limit:,}"
@@ -118,7 +135,7 @@ def _build_status_table(
         "GraphQL quota:", f"[{gql_color}]{gql_str}[/] (cost: {gql_cost or '?'})",
     )
 
-    # Row 5: Status and REST quota
+    # Row 6: Status and REST quota
     if rest_remaining is not None and rest_limit is not None:
         rest_str = f"{rest_remaining:,}/{rest_limit:,}"
     else:
@@ -140,6 +157,24 @@ def _build_status_table(
     )
 
 
+def _build_summary_panel(run: CrawlRunModel, elapsed: float) -> Panel:
+    """Build the final crawl summary panel."""
+    lines = [
+        f"  🆕 New repos:          {run.repos_new}",
+        f"  🔄 Refreshed (stale):  {run.repos_refreshed}",
+        f"  ⏩ Skipped (fresh):    {run.repos_skipped_fresh}",
+        f"  📸 Snapshots taken:    {run.snapshots_taken}",
+        f"  ❌ Errors:             {run.errors_count}",
+        f"  ⏱  Duration:           {_format_elapsed(elapsed)}",
+    ]
+    return Panel(
+        "\n".join(lines),
+        title="[bold]Crawl Summary[/]",
+        border_style="green",
+        padding=(1, 2),
+    )
+
+
 async def run_crawl(
     settings: Settings,
     query: str | None = None,
@@ -150,6 +185,11 @@ async def run_crawl(
     When the query matches more than 1,000 repositories (GitHub's search
     API hard cap), the query is automatically sliced into date-range
     partitions so that every result is fetched.
+
+    Uses a three-tier smart overwrite strategy:
+      - CASE A (NEW): Full enrichment + insert + snapshot
+      - CASE B (REFRESH): Full re-enrichment + upsert + snapshot
+      - CASE C (SKIP-ENRICH): Lightweight update + conditional snapshot
 
     Args:
         settings: Application configuration.
@@ -163,6 +203,9 @@ async def run_crawl(
         settings = settings.model_copy(update={"max_pages": max_pages})
 
     search_query = query or settings.default_query
+    force_refresh = settings.force_refresh
+    refresh_ttl = settings.refresh_ttl_hours
+    snapshot_ttl = settings.snapshot_ttl_hours
 
     run = CrawlRunModel(
         run_id=uuid.uuid4().hex[:12],
@@ -197,6 +240,9 @@ async def run_crawl(
                         repos_found=run.repos_found,
                         repos_new=run.repos_new,
                         repos_updated=run.repos_updated,
+                        repos_refreshed=run.repos_refreshed,
+                        repos_skipped_fresh=run.repos_skipped_fresh,
+                        snapshots_taken=run.snapshots_taken,
                         errors=run.errors_count,
                         gql_remaining=rate_state.get("gql_remaining"),
                         gql_limit=rate_state.get("gql_limit"),
@@ -269,32 +315,104 @@ async def run_crawl(
                                     )
                                     run.errors_count += 1
 
-                            status_msg = (
-                                f"Enriching {len(repos)} repos (REST)..."
-                            )
-                            _refresh()
+                            # ── Classify repos by freshness ──────────────
+                            now_utc = datetime.now(tz=timezone.utc)
+                            repos_to_enrich: list[RepositoryModel] = []
+                            repos_fresh: list[RepositoryModel] = []
 
-                            # Enrich with REST data
-                            await enrich_repos(client, settings, repos)
+                            for repo in repos:
+                                freshness = get_repo_freshness(conn, repo.id)
+                                if freshness is None:
+                                    # CASE A — NEW
+                                    repos_to_enrich.append(repo)
+                                elif force_refresh:
+                                    # Force refresh overrides TTL
+                                    repos_to_enrich.append(repo)
+                                else:
+                                    updated_in_db_at = freshness[0]
+                                    if updated_in_db_at is not None:
+                                        age_hours = (
+                                            now_utc - updated_in_db_at.replace(
+                                                tzinfo=timezone.utc,
+                                            )
+                                        ).total_seconds() / 3600
+                                    else:
+                                        age_hours = float("inf")
+
+                                    if age_hours >= refresh_ttl:
+                                        # CASE B — STALE
+                                        repos_to_enrich.append(repo)
+                                    else:
+                                        # CASE C — FRESH
+                                        repos_fresh.append(repo)
+
+                            # ── Enrich only repos that need it ───────────
+                            if repos_to_enrich:
+                                status_msg = (
+                                    f"Enriching {len(repos_to_enrich)} repos "
+                                    f"(REST)..."
+                                )
+                                _refresh()
+                                await enrich_repos(
+                                    client, settings, repos_to_enrich,
+                                )
 
                             status_msg = (
                                 f"Persisting {len(repos)} repos..."
                             )
                             _refresh()
 
-                            # Persist
-                            for repo in repos:
+                            # ── Persist: full upsert for enriched repos ──
+                            for repo in repos_to_enrich:
                                 try:
-                                    is_new = upsert_repository(conn, repo)
+                                    freshness = get_repo_freshness(
+                                        conn, repo.id,
+                                    )
+                                    is_new = freshness is None
+                                    upsert_repository(conn, repo)
                                     insert_snapshot(conn, repo)
+                                    run.snapshots_taken += 1
+
                                     if is_new:
                                         run.repos_new += 1
+                                        logger.info(
+                                            "[NEW] {}", repo.full_name,
+                                        )
                                     else:
-                                        run.repos_updated += 1
+                                        run.repos_refreshed += 1
+                                        logger.info(
+                                            "[REFRESH] {} — stale",
+                                            repo.full_name,
+                                        )
                                     run.repos_found += 1
                                 except Exception as exc:
                                     logger.error(
                                         "Failed to persist {}: {}",
+                                        repo.full_name, exc,
+                                    )
+                                    run.errors_count += 1
+
+                            # ── Persist: lightweight update for fresh ─────
+                            for repo in repos_fresh:
+                                try:
+                                    lightweight_update_repo(conn, repo)
+                                    run.repos_skipped_fresh += 1
+                                    run.repos_found += 1
+
+                                    # Conditional snapshot
+                                    if should_take_snapshot(
+                                        conn, repo.id, snapshot_ttl,
+                                    ):
+                                        insert_snapshot(conn, repo)
+                                        run.snapshots_taken += 1
+
+                                    logger.debug(
+                                        "[SKIP-ENRICH] {} — fresh",
+                                        repo.full_name,
+                                    )
+                                except Exception as exc:
+                                    logger.error(
+                                        "Failed to update {}: {}",
                                         repo.full_name, exc,
                                     )
                                     run.errors_count += 1
@@ -349,13 +467,19 @@ async def run_crawl(
                 await client.close()
 
     elapsed = monotonic() - start_time
+
+    # Print the final summary panel
+    console.print(_build_summary_panel(run, elapsed))
+
     logger.success(
-        "Crawl {} finished in {} - found={}, new={}, updated={}, errors={}",
+        "Crawl {} finished in {} — new={}, refreshed={}, "
+        "skipped={}, snapshots={}, errors={}",
         run.run_id,
         _format_elapsed(elapsed),
-        run.repos_found,
         run.repos_new,
-        run.repos_updated,
+        run.repos_refreshed,
+        run.repos_skipped_fresh,
+        run.snapshots_taken,
         run.errors_count,
     )
     return run
