@@ -5,7 +5,7 @@ from __future__ import annotations
 import duckdb
 import polars as pl
 
-__all__: list[str] = ["minmax_norm", "load_momentum_7d"]
+__all__: list[str] = ["minmax_norm", "percentile_rank", "load_momentum_7d"]
 
 
 def minmax_norm(col: str) -> pl.Expr:
@@ -20,6 +20,27 @@ def minmax_norm(col: str) -> pl.Expr:
     return (pl.col(col) - pl.col(col).min()) / (
         (pl.col(col).max() - pl.col(col).min()).clip(lower_bound=1e-9)
     )
+
+
+def percentile_rank(col: str, group_by: list[str] | None = None) -> pl.Expr:
+    """Compute percentile rank for a column, optionally partitioned.
+
+    Args:
+        col: Column name.
+        group_by: List of columns to partition the ranking.
+
+    Returns:
+        A Polars expression.
+    """
+    rank_expr = pl.col(col).rank()
+    count_expr = pl.col(col).count()
+    
+    if group_by:
+        rank_expr = rank_expr.over(group_by)
+        count_expr = count_expr.over(group_by)
+        
+    expr = (rank_expr - 1.0) / (count_expr - 1.0).clip(lower_bound=1e-9)
+    return expr.fill_null(0.0).clip(lower_bound=0.0, upper_bound=1.0)
 
 
 def load_momentum_7d(conn: duckdb.DuckDBPyConnection) -> pl.DataFrame:

@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS repositories (
     activity_score        DOUBLE,
     readme_quality        DOUBLE,
     potential_score       DOUBLE,
+    age_tier              VARCHAR,
+    maturity_tier         VARCHAR,
     scraped_at            TIMESTAMPTZ DEFAULT current_timestamp,
     updated_in_db_at      TIMESTAMPTZ DEFAULT current_timestamp
 );
@@ -79,6 +81,11 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
 
 
 # Migration helpers — add columns that may be missing in older databases.
+_REPOSITORIES_MIGRATIONS: list[str] = [
+    "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS age_tier VARCHAR",
+    "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS maturity_tier VARCHAR",
+]
+
 _CRAWL_RUNS_MIGRATIONS: list[str] = [
     "ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS repos_refreshed INTEGER DEFAULT 0",
     "ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS repos_skipped_fresh INTEGER DEFAULT 0",
@@ -99,5 +106,7 @@ def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(CRAWL_RUNS_DDL)
 
     # Apply migrations for existing tables
+    for stmt in _REPOSITORIES_MIGRATIONS:
+        conn.execute(stmt)
     for stmt in _CRAWL_RUNS_MIGRATIONS:
         conn.execute(stmt)

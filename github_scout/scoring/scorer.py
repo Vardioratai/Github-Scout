@@ -10,7 +10,7 @@ from loguru import logger
 
 from github_scout.database.connection import get_connection
 from github_scout.database.schema import create_tables
-from github_scout.scoring.features import load_momentum_7d, minmax_norm
+from github_scout.scoring.features import load_momentum_7d, percentile_rank
 
 __all__: list[str] = ["compute_scores"]
 
@@ -84,6 +84,19 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
 
     df = df.with_columns(
         [
+            pl.when(pl.col("days_since_creation") < 180).then(pl.lit("Emerging"))
+            .when(pl.col("days_since_creation") <= 730).then(pl.lit("Growing"))
+            .otherwise(pl.lit("Established"))
+            .alias("age_tier"),
+            pl.when(pl.col("stars") < 100).then(pl.lit("Seed"))
+            .when(pl.col("stars") <= 1000).then(pl.lit("Traction"))
+            .otherwise(pl.lit("Scale"))
+            .alias("maturity_tier")
+        ]
+    )
+
+    df = df.with_columns(
+        [
             (
                 pl.col("stars").cast(pl.Float64)
                 / pl.col("days_since_creation").clip(lower_bound=1)
@@ -129,22 +142,25 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
         df = df.with_columns(pl.col("momentum_7d").fill_null(0.0))
 
     # 3. Final composite score  (0-100)
+    # Ranks are calculated within age and maturity tiers
+    group_by_cols = ["age_tier", "maturity_tier"]
+
     df = df.with_columns(
         [
             (
                 100.0
                 * (
-                    0.35 * minmax_norm("star_velocity")
+                    0.35 * percentile_rank("star_velocity", group_by_cols)
                     + 0.20 * pl.col("recency_decay")
-                    + 0.20 * minmax_norm("raw_activity")
-                    + 0.15 * minmax_norm("momentum_7d").fill_null(0.0)
+                    + 0.20 * percentile_rank("raw_activity", group_by_cols)
+                    + 0.15 * percentile_rank("momentum_7d", group_by_cols)
                     + 0.10 * pl.col("readme_quality")
                 )
             )
             .clip(lower_bound=0.0, upper_bound=100.0)
             .alias("potential_score"),
             # Also store the intermediate activity_score
-            minmax_norm("raw_activity").alias("activity_score"),
+            percentile_rank("raw_activity", group_by_cols).alias("activity_score"),
         ]
     )
 
@@ -159,6 +175,8 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
                 activity_score  = $4,
                 readme_quality  = $5,
                 potential_score = $6,
+                age_tier        = $7,
+                maturity_tier   = $8,
                 updated_in_db_at = current_timestamp
             WHERE id = $1
             """,
@@ -169,6 +187,8 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
                 row.get("activity_score"),
                 row.get("readme_quality"),
                 row.get("potential_score"),
+                row.get("age_tier"),
+                row.get("maturity_tier"),
             ],
         )
         scored_count += 1

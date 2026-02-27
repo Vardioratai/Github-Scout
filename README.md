@@ -276,14 +276,23 @@ Supported `created:` qualifier formats:
 
 ## 🧮 Scoring Algorithm
 
-The **potential score** (0–100) is a weighted composite of:
+The **potential score** (0–100) is a weighted composite designed to surface emerging high-impact projects. Instead of comparing all repositories linearly, repositories are evaluated using **percentiles** within their respective **age** and **maturity** cohorts to prevent massive established projects from overshadowing smaller, promising ones.
+
+### Cohort Tiers
+
+| Tier | Definition |
+|---|---|
+| **Age** | `Emerging` (< 6 months), `Growing` (6-24 months), `Established` (> 24 months) |
+| **Maturity** | `Seed` (< 100 stars), `Traction` (100–1,000 stars), `Scale` (> 1,000 stars) |
+
+### Scoring Factors
 
 | Factor | Weight | Description |
 |---|---|---|
-| Star velocity | 35% | Stars per day since creation |
+| Star velocity | 35% | Percentile rank of stars per day since creation within tier |
 | Recency decay | 20% | Exponential decay for repos older than 90 days |
-| Activity | 20% | `log1p(forks + open_issues + contributors)` |
-| 7-day momentum | 15% | Star growth delta from historical snapshots |
+| Activity | 20% | Percentile rank of `log1p(forks + open_issues + contributors)` within tier |
+| 7-day momentum | 15% | Percentile rank of star growth delta from historical snapshots within tier |
 | README quality | 10% | Badges, sections, install instructions, demos |
 
 ---
