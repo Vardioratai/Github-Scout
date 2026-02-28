@@ -7,6 +7,7 @@ __all__: list[str] = [
     "TOPIC_HEATMAP",
     "STAR_VELOCITY_PERCENTILES",
     "SCORE_DISTRIBUTION",
+    "MATURITY_TIER_SUMMARY",
 ]
 
 TOP_POTENTIAL_REPOS: str = """
@@ -22,11 +23,12 @@ SELECT
     readme_quality,
     potential_score,
     created_at,
-    url
+    url,
+    COALESCE(maturity_tier, 'Unknown') AS maturity_tier
 FROM repositories
 WHERE potential_score IS NOT NULL
 ORDER BY potential_score DESC
-LIMIT 50;
+LIMIT 150;
 """
 
 TRENDING_7D: str = """
@@ -46,6 +48,7 @@ old_snap AS (
 )
 SELECT
     r.full_name,
+    COALESCE(r.maturity_tier, 'Unknown') AS maturity_tier,
     r.stars AS current_stars,
     o.stars AS stars_7d_ago,
     (c.stars - o.stars) AS delta_stars,
@@ -102,9 +105,31 @@ WHERE star_velocity IS NOT NULL;
 SCORE_DISTRIBUTION: str = """
 SELECT
     CAST(FLOOR(potential_score / 10) AS INTEGER) AS bucket,
-    COUNT(*) AS count
+    COUNT(*) AS total_count,
+    SUM(CASE WHEN maturity_tier = 'Seed' THEN 1 ELSE 0 END) AS count_seed,
+    SUM(CASE WHEN maturity_tier = 'Traction' THEN 1 ELSE 0 END) AS count_traction,
+    SUM(CASE WHEN maturity_tier = 'Scale' THEN 1 ELSE 0 END) AS count_scale
 FROM repositories
 WHERE potential_score IS NOT NULL
 GROUP BY bucket
 ORDER BY bucket;
+"""
+
+MATURITY_TIER_SUMMARY: str = """
+SELECT
+    COALESCE(maturity_tier, 'Unknown') AS tier,
+    COUNT(*) AS repo_count,
+    ROUND(AVG(potential_score), 2) AS avg_score,
+    ROUND(AVG(star_velocity), 4) AS avg_velocity,
+    ROUND(AVG(stars), 1) AS avg_stars
+FROM repositories
+WHERE potential_score IS NOT NULL
+GROUP BY maturity_tier
+ORDER BY 
+    CASE maturity_tier
+        WHEN 'Scale' THEN 1
+        WHEN 'Traction' THEN 2
+        WHEN 'Seed' THEN 3
+        ELSE 4
+    END;
 """

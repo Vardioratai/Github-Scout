@@ -14,6 +14,7 @@ from rich.table import Table
 
 from github_scout.analytics.queries import (
     LANGUAGE_DISTRIBUTION,
+    MATURITY_TIER_SUMMARY,
     SCORE_DISTRIBUTION,
     STAR_VELOCITY_PERCENTILES,
     TOP_POTENTIAL_REPOS,
@@ -101,6 +102,21 @@ def score() -> None:
         scored = compute_scores(str(settings.db_path))
 
     console.print(f"[green]Scored {scored} repositories.[/]")
+    
+    if scored > 0:
+        with get_connection(settings.db_path) as conn:
+            tier_rows = conn.execute(MATURITY_TIER_SUMMARY).fetchall()
+            if tier_rows:
+                console.print()
+                table = Table(title="Maturity Tier Summary (Current Dataset)")
+                table.add_column("Tier", style="cyan")
+                table.add_column("Count", justify="right")
+                table.add_column("Avg Score", justify="right", style="green")
+                table.add_column("Avg Star Velocity", justify="right")
+                table.add_column("Avg Stars", justify="right")
+                for r in tier_rows:
+                    table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]))
+                console.print(table)
 
 
 # ------------------------------------------------------------------
@@ -124,25 +140,41 @@ def top(
         console.print("[yellow]No scored repositories found. Run 'crawl' then 'score' first.[/]")
         return
 
-    table = Table(title=f"Top {limit} Repositories by Potential Score")
-    table.add_column("Repo", style="cyan", no_wrap=True)
-    table.add_column("Lang", style="magenta")
-    table.add_column("⭐", justify="right")
-    table.add_column("Score", justify="right", style="green bold")
-    table.add_column("Velocity", justify="right")
-    table.add_column("README", justify="right")
+    # Group by tier
+    tiers = {"Scale": [], "Traction": [], "Seed": []}
+    for row in rows:
+        tier = str(row[12])  # maturity_tier is the 13th column (index 12)
+        if tier in tiers:
+            tiers[tier].append(row)
+        else:
+            if "Unknown" not in tiers:
+                tiers["Unknown"] = []
+            tiers["Unknown"].append(row)
 
-    for row in rows[:limit]:
-        table.add_row(
-            str(row[0]),
-            str(row[1] or "—"),
-            str(row[2]),
-            f"{row[9]:.1f}" if row[9] is not None else "—",
-            f"{row[6]:.2f}" if row[6] is not None else "—",
-            f"{row[8]:.2f}" if row[8] is not None else "—",
-        )
+    for tier_name, tier_rows in tiers.items():
+        if not tier_rows:
+            continue
+            
+        table = Table(title=f"Top Repositories by Potential Score ({tier_name} Tier)")
+        table.add_column("Repo", style="cyan", no_wrap=True)
+        table.add_column("Lang", style="magenta")
+        table.add_column("Stars", justify="right")
+        table.add_column("Score", justify="right", style="green bold")
+        table.add_column("Velocity", justify="right")
+        table.add_column("README", justify="right")
 
-    console.print(table)
+        for row in tier_rows[:limit]:
+            table.add_row(
+                str(row[0]),
+                str(row[1] or "—"),
+                str(row[2]),
+                f"{row[9]:.1f}" if row[9] is not None else "—",
+                f"{row[6]:.2f}" if row[6] is not None else "—",
+                f"{row[8]:.2f}" if row[8] is not None else "—",
+            )
+
+        console.print(table)
+        console.print()
 
 
 # ------------------------------------------------------------------
@@ -159,13 +191,27 @@ def stats() -> None:
     with get_connection(settings.db_path) as conn:
         create_tables(conn)
 
+        # Maturity tier summary
+        tier_rows = conn.execute(MATURITY_TIER_SUMMARY).fetchall()
+        if tier_rows:
+            table = Table(title="Maturity Tier Analysis")
+            table.add_column("Tier", style="cyan")
+            table.add_column("Count", justify="right")
+            table.add_column("Avg Score", justify="right", style="green")
+            table.add_column("Avg Star Velocity", justify="right")
+            table.add_column("Avg Stars", justify="right")
+            for r in tier_rows:
+                table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]))
+            console.print(table)
+            console.print()
+
         # Language distribution
         lang_rows = conn.execute(LANGUAGE_DISTRIBUTION).fetchall()
         if lang_rows:
             t = Table(title="Language Distribution")
             t.add_column("Language", style="cyan")
             t.add_column("Count", justify="right")
-            t.add_column("Avg ⭐", justify="right")
+            t.add_column("Avg Stars", justify="right")
             t.add_column("Avg Score", justify="right", style="green")
             for r in lang_rows[:15]:
                 t.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]))
@@ -196,28 +242,49 @@ def stats() -> None:
         # Score distribution
         dist_rows = conn.execute(SCORE_DISTRIBUTION).fetchall()
         if dist_rows:
-            t = Table(title="Score Distribution (histogram)")
+            t = Table(title="Score Distribution by Maturity Tier")
             t.add_column("Bucket", style="cyan")
-            t.add_column("Count", justify="right", style="green")
+            t.add_column("Total", justify="right", style="green")
+            t.add_column("Seed", justify="right")
+            t.add_column("Traction", justify="right")
+            t.add_column("Scale", justify="right")
             for r in dist_rows:
                 bucket_label = f"{r[0] * 10}–{(r[0] + 1) * 10}"
-                t.add_row(bucket_label, str(r[1]))
+                t.add_row(bucket_label, str(r[1]), str(r[2]), str(r[3]), str(r[4]))
             console.print(t)
 
-        # Trending 7d
+        # Trending 7d - Split by tier
         trend_rows = conn.execute(TRENDING_7D).fetchall()
         if trend_rows:
-            t = Table(title="Trending (7-day momentum)")
-            t.add_column("Repo", style="cyan")
-            t.add_column("Δ Stars", justify="right", style="green")
-            t.add_column("Momentum", justify="right")
-            for r in trend_rows[:10]:
-                t.add_row(
-                    str(r[0]),
-                    str(r[3]),
-                    f"{r[4]:.4f}" if r[4] is not None else "—",
-                )
-            console.print(t)
+            # Group rows by tier
+            tiers = {"Scale": [], "Traction": [], "Seed": []}
+            for r in trend_rows:
+                tier = str(r[1])
+                if tier in tiers:
+                    tiers[tier].append(r)
+                else:
+                    # E.g. Unknown
+                    if "Unknown" not in tiers:
+                        tiers["Unknown"] = []
+                    tiers["Unknown"].append(r)
+
+            for tier_name, rows in tiers.items():
+                if not rows:
+                    continue
+                t = Table(title=f"Trending 7d ({tier_name} Tier)")
+                t.add_column("Repo", style="cyan")
+                t.add_column("Δ Stars", justify="right", style="green")
+                t.add_column("Momentum", justify="right")
+                
+                # Show top 5 for each tier instead of 10 globally to keep it concise
+                for r in rows[:5]:
+                    t.add_row(
+                        str(r[0]),
+                        str(r[4]),
+                        f"{r[5]:.4f}" if r[5] is not None else "—",
+                    )
+                console.print(t)
+                console.print()
 
 
 # ------------------------------------------------------------------
