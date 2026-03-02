@@ -1,4 +1,4 @@
-"""Tests for the HTTP client layer — pagination and retry logic."""
+"""Tests for the HTTP client layer — pagination, retry logic, and model parsing."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _graphql_response(
 
 
 def _fake_repo_node(name: str = "test-repo") -> dict:
-    """Build a minimal valid repo node matching the GraphQL fragment."""
+    """Build a minimal valid repo node matching the updated GraphQL fragment (including closedIssues)."""
     return {
         "id": f"id_{name}",
         "name": name,
@@ -69,6 +69,7 @@ def _fake_repo_node(name: str = "test-repo") -> dict:
         "forkCount": 30,
         "watchers": {"totalCount": 10},
         "issues": {"totalCount": 5},
+        "closedIssues": {"totalCount": 40},
         "createdAt": "2026-01-15T00:00:00Z",
         "updatedAt": "2026-02-20T00:00:00Z",
         "pushedAt": "2026-02-20T00:00:00Z",
@@ -145,3 +146,56 @@ async def test_429_triggers_retry() -> None:
 
     assert call_count >= 3, "Should have retried at least twice before succeeding"
     assert len(pages) == 1
+
+
+# ------------------------------------------------------------------
+# Test: RepositoryModel.from_graphql parses closedIssues correctly
+# ------------------------------------------------------------------
+
+
+def test_model_parses_closed_issues() -> None:
+    """RepositoryModel.from_graphql must correctly parse the closedIssues field."""
+    from github_scout.models.repository import RepositoryModel
+
+    node = _fake_repo_node("my-repo")
+    model = RepositoryModel.from_graphql(node)
+
+    assert model.closed_issues == 40, (
+        f"Expected closed_issues=40, got {model.closed_issues}"
+    )
+    assert model.open_issues == 5, (
+        f"Expected open_issues=5, got {model.open_issues}"
+    )
+
+
+# ------------------------------------------------------------------
+# Test: RepositoryModel.from_graphql handles missing closedIssues gracefully
+# ------------------------------------------------------------------
+
+
+def test_model_handles_missing_closed_issues() -> None:
+    """RepositoryModel.from_graphql must default closed_issues to 0 if not present."""
+    from github_scout.models.repository import RepositoryModel
+
+    node = _fake_repo_node("old-repo")
+    # Simulate legacy GraphQL response without closedIssues key
+    del node["closedIssues"]
+
+    model = RepositoryModel.from_graphql(node)
+    assert model.closed_issues == 0, (
+        f"Expected closed_issues=0 when field missing, got {model.closed_issues}"
+    )
+
+
+# ------------------------------------------------------------------
+# Test: RepositoryModel defaults
+# ------------------------------------------------------------------
+
+
+def test_model_defaults() -> None:
+    """RepositoryModel must have correct defaults for open_issues and closed_issues."""
+    from github_scout.models.repository import RepositoryModel
+
+    model = RepositoryModel(id="R_x", name="x", full_name="owner/x")
+    assert model.open_issues == 0
+    assert model.closed_issues == 0
