@@ -112,10 +112,11 @@ def score() -> None:
                 table.add_column("Tier", style="cyan")
                 table.add_column("Count", justify="right")
                 table.add_column("Avg Score", justify="right", style="green")
+                table.add_column("Avg HG Score", justify="right", style="green bold")
                 table.add_column("Avg Star Velocity", justify="right")
                 table.add_column("Avg Stars", justify="right")
                 for r in tier_rows:
-                    table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]))
+                    table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[5]))
                 console.print(table)
 
 
@@ -143,7 +144,7 @@ def top(
     # Group by tier
     tiers = {"Scale": [], "Traction": [], "Seed": []}
     for row in rows:
-        tier = str(row[12])  # maturity_tier is the 13th column (index 12)
+        tier = str(row[13])  # maturity_tier is the 14th column (index 13)
         if tier in tiers:
             tiers[tier].append(row)
         else:
@@ -159,7 +160,8 @@ def top(
         table.add_column("Repo", style="cyan", no_wrap=True)
         table.add_column("Lang", style="magenta")
         table.add_column("Stars", justify="right")
-        table.add_column("Score", justify="right", style="green bold")
+        table.add_column("Score", justify="right", style="green")
+        table.add_column("HG Score", justify="right", style="green bold")
         table.add_column("Velocity", justify="right")
         table.add_column("README", justify="right")
 
@@ -169,6 +171,7 @@ def top(
                 str(row[1] or "—"),
                 str(row[2]),
                 f"{row[9]:.1f}" if row[9] is not None else "—",
+                f"{row[10]:.1f}" if row[10] is not None else "—",
                 f"{row[6]:.2f}" if row[6] is not None else "—",
                 f"{row[8]:.2f}" if row[8] is not None else "—",
             )
@@ -198,10 +201,11 @@ def stats() -> None:
             table.add_column("Tier", style="cyan")
             table.add_column("Count", justify="right")
             table.add_column("Avg Score", justify="right", style="green")
+            table.add_column("Avg HG Score", justify="right", style="green bold")
             table.add_column("Avg Star Velocity", justify="right")
             table.add_column("Avg Stars", justify="right")
             for r in tier_rows:
-                table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]))
+                table.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[5]))
             console.print(table)
             console.print()
 
@@ -213,8 +217,9 @@ def stats() -> None:
             t.add_column("Count", justify="right")
             t.add_column("Avg Stars", justify="right")
             t.add_column("Avg Score", justify="right", style="green")
+            t.add_column("Avg HG Score", justify="right", style="green bold")
             for r in lang_rows[:15]:
-                t.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]))
+                t.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]))
             console.print(t)
 
         # Topic heatmap
@@ -224,8 +229,9 @@ def stats() -> None:
             t.add_column("Topic", style="cyan")
             t.add_column("Count", justify="right")
             t.add_column("Avg Score", justify="right", style="green")
+            t.add_column("Avg HG Score", justify="right", style="green bold")
             for r in topic_rows[:20]:
-                t.add_row(str(r[0]), str(r[1]), str(r[2]))
+                t.add_row(str(r[0]), str(r[1]), str(r[2]), str(r[3]))
             console.print(t)
 
         # Star velocity percentiles

@@ -34,6 +34,7 @@ class RepositoryModel(BaseModel):
     forks: int = 0
     watchers: int = 0
     open_issues: int = 0
+    closed_issues: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
     pushed_at: datetime | None = None
@@ -87,6 +88,7 @@ class RepositoryModel(BaseModel):
             forks=node.get("forkCount", 0),
             watchers=node.get("watchers", {}).get("totalCount", 0),
             open_issues=node.get("issues", {}).get("totalCount", 0),
+            closed_issues=node.get("closedIssues", {}).get("totalCount", 0),
             created_at=node.get("createdAt"),
             updated_at=node.get("updatedAt"),
             pushed_at=node.get("pushedAt"),

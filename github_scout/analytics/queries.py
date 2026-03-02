@@ -22,6 +22,7 @@ SELECT
     momentum_7d,
     readme_quality,
     potential_score,
+    HG_score,
     created_at,
     url,
     COALESCE(maturity_tier, 'Unknown') AS maturity_tier
@@ -57,6 +58,7 @@ SELECT
          ELSE 0.0
     END AS momentum_7d,
     r.potential_score,
+    r.HG_score,
     r.url
 FROM current_snap c
 JOIN old_snap o ON c.repo_id = o.repo_id AND o.rn = 1
@@ -71,7 +73,8 @@ SELECT
     COALESCE(primary_language, 'Unknown') AS language,
     COUNT(*) AS repo_count,
     ROUND(AVG(stars), 1) AS avg_stars,
-    ROUND(AVG(potential_score), 2) AS avg_score
+    ROUND(AVG(potential_score), 2) AS avg_score,
+    ROUND(AVG(HG_score), 2) AS avg_hg_score
 FROM repositories
 GROUP BY primary_language
 ORDER BY repo_count DESC;
@@ -79,14 +82,15 @@ ORDER BY repo_count DESC;
 
 TOPIC_HEATMAP: str = """
 WITH exploded AS (
-    SELECT UNNEST(topics) AS topic, potential_score
+    SELECT UNNEST(topics) AS topic, potential_score, HG_score
     FROM repositories
     WHERE topics IS NOT NULL
 )
 SELECT
     topic,
     COUNT(*) AS repo_count,
-    ROUND(AVG(potential_score), 2) AS avg_score
+    ROUND(AVG(potential_score), 2) AS avg_score,
+    ROUND(AVG(HG_score), 2) AS avg_hg_score
 FROM exploded
 GROUP BY topic
 ORDER BY repo_count DESC
@@ -120,6 +124,7 @@ SELECT
     COALESCE(maturity_tier, 'Unknown') AS tier,
     COUNT(*) AS repo_count,
     ROUND(AVG(potential_score), 2) AS avg_score,
+    ROUND(AVG(HG_score), 2) AS avg_hg_score,
     ROUND(AVG(star_velocity), 4) AS avg_velocity,
     ROUND(AVG(stars), 1) AS avg_stars
 FROM repositories

@@ -107,6 +107,19 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
             .alias("recency_decay"),
             (
                 pl.col("forks").cast(pl.Float64)
+                / pl.when(pl.col("stars") > 0).then(pl.col("stars")).otherwise(1.0)
+            ).alias("raw_fork_engagement"),
+            (
+                pl.col("contributors_count").fill_null(0).cast(pl.Float64)
+                + (
+                    pl.col("closed_issues").fill_null(0).cast(pl.Float64)
+                    / pl.when((pl.col("open_issues").fill_null(0) + pl.col("closed_issues").fill_null(0)) > 0)
+                    .then(pl.col("open_issues").fill_null(0) + pl.col("closed_issues").fill_null(0))
+                    .otherwise(1.0)
+                )
+            ).alias("raw_community_health"),
+            (
+                pl.col("forks").cast(pl.Float64)
                 + pl.col("open_issues").cast(pl.Float64)
                 + pl.col("contributors_count").fill_null(0).cast(pl.Float64)
             )
@@ -159,6 +172,19 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
             )
             .clip(lower_bound=0.0, upper_bound=100.0)
             .alias("potential_score"),
+            (
+                100.0
+                * (
+                    0.28 * percentile_rank("star_velocity", group_by_cols)
+                    + 0.22 * percentile_rank("raw_fork_engagement", group_by_cols)
+                    + 0.18 * percentile_rank("raw_activity", group_by_cols)
+                    + 0.15 * pl.col("readme_quality")
+                    + 0.10 * percentile_rank("raw_community_health", group_by_cols)
+                    + 0.07 * pl.col("recency_decay")
+                )
+            )
+            .clip(lower_bound=0.0, upper_bound=100.0)
+            .alias("HG_score"),
             # Also store the intermediate activity_score
             percentile_rank("raw_activity", group_by_cols).alias("activity_score"),
         ]
@@ -175,8 +201,9 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
                 activity_score  = $4,
                 readme_quality  = $5,
                 potential_score = $6,
-                age_tier        = $7,
-                maturity_tier   = $8,
+                HG_score        = $7,
+                age_tier        = $8,
+                maturity_tier   = $9,
                 updated_in_db_at = current_timestamp
             WHERE id = $1
             """,
@@ -187,6 +214,7 @@ def _score_pipeline(conn: duckdb.DuckDBPyConnection) -> int:
                 row.get("activity_score"),
                 row.get("readme_quality"),
                 row.get("potential_score"),
+                row.get("HG_score"),
                 row.get("age_tier"),
                 row.get("maturity_tier"),
             ],

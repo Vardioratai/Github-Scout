@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS repositories (
     forks                 INTEGER DEFAULT 0,
     watchers              INTEGER DEFAULT 0,
     open_issues           INTEGER DEFAULT 0,
+    closed_issues         INTEGER DEFAULT 0,
     created_at            TIMESTAMPTZ,
     updated_at            TIMESTAMPTZ,
     pushed_at             TIMESTAMPTZ,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS repositories (
     activity_score        DOUBLE,
     readme_quality        DOUBLE,
     potential_score       DOUBLE,
+    HG_score              DOUBLE,
     age_tier              VARCHAR,
     maturity_tier         VARCHAR,
     scraped_at            TIMESTAMPTZ DEFAULT current_timestamp,
@@ -84,6 +86,8 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
 _REPOSITORIES_MIGRATIONS: list[str] = [
     "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS age_tier VARCHAR",
     "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS maturity_tier VARCHAR",
+    "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS closed_issues INTEGER DEFAULT 0",
+    "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS HG_score DOUBLE",
 ]
 
 _CRAWL_RUNS_MIGRATIONS: list[str] = [

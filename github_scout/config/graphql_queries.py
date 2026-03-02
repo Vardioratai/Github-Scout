@@ -21,6 +21,7 @@ fragment RepoFields on Repository {
   forkCount
   watchers { totalCount }
   issues(states: OPEN) { totalCount }
+  closedIssues: issues(states: CLOSED) { totalCount }
   createdAt
   updatedAt
   pushedAt

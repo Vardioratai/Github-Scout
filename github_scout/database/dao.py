@@ -200,7 +200,7 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             id, name, full_name, owner_login, owner_type,
             description, url, homepage_url, primary_language,
             topics, license_spdx, is_archived, is_fork, is_template,
-            stars, forks, watchers, open_issues,
+            stars, forks, watchers, open_issues, closed_issues,
             created_at, updated_at, pushed_at, disk_usage_kb,
             readme_length_chars, readme_h2_sections,
             readme_has_badges, readme_has_demo_gif, readme_has_install,
@@ -211,17 +211,17 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9,
             $10, $11, $12, $13, $14,
-            $15, $16, $17, $18,
-            $19, $20, $21, $22,
-            $23, $24,
-            $25, $26, $27,
-            $28, $29,
-            $30, $31,
+            $15, $16, $17, $18, $19,
+            $20, $21, $22, $23,
+            $24, $25,
+            $26, $27, $28,
+            $29, $30,
+            $31, $32,
             COALESCE(
                 (SELECT scraped_at FROM repositories WHERE id = $1),
-                $32::TIMESTAMPTZ
+                $33::TIMESTAMPTZ
             ),
-            $32::TIMESTAMPTZ
+            $33::TIMESTAMPTZ
         )
         """,
         [
@@ -243,6 +243,7 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             repo.forks,
             repo.watchers,
             repo.open_issues,
+            repo.closed_issues,
             repo.created_at.isoformat() if repo.created_at else None,
             repo.updated_at.isoformat() if repo.updated_at else None,
             repo.pushed_at.isoformat() if repo.pushed_at else None,
@@ -349,9 +350,10 @@ def lightweight_update_repo(
             stars            = $2,
             forks            = $3,
             open_issues      = $4,
-            pushed_at        = $5,
-            updated_at       = $6,
-            updated_in_db_at = $7
+            closed_issues    = $5,
+            pushed_at        = $6,
+            updated_at       = $7,
+            updated_in_db_at = $8
         WHERE id = $1
         """,
         [
@@ -359,6 +361,7 @@ def lightweight_update_repo(
             repo.stars,
             repo.forks,
             repo.open_issues,
+            repo.closed_issues,
             repo.pushed_at.isoformat() if repo.pushed_at else None,
             repo.updated_at.isoformat() if repo.updated_at else None,
             now,
