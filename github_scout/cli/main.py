@@ -88,6 +88,26 @@ def crawl(
 
 
 # ------------------------------------------------------------------
+# poll
+# ------------------------------------------------------------------
+
+
+@app.command()
+def poll(
+    limit: int = typer.Option(
+        100, "--limit", "-n", help="Number of oldest refreshed repos to poll"
+    ),
+) -> None:
+    """Poll known repositories relying on HTTP ETags to save API tokens."""
+    settings = _get_settings()
+    _configure_logging(settings.log_level)
+
+    from github_scout.crawler.poller import run_poll
+
+    asyncio.run(run_poll(settings, limit=limit))
+
+
+# ------------------------------------------------------------------
 # score
 # ------------------------------------------------------------------
 

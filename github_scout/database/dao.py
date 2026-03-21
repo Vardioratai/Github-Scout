@@ -24,6 +24,7 @@ __all__: list[str] = [
     "delete_repos",
     "delete_orphan_snapshots",
     "count_orphan_snapshots",
+    "get_repo_volatile_stats",
 ]
 
 
@@ -206,7 +207,7 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             readme_has_badges, readme_has_demo_gif, readme_has_install,
             contributors_count, releases_count,
             latest_release_tag, latest_release_at,
-            scraped_at, updated_in_db_at
+            etag, scraped_at, updated_in_db_at
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9,
@@ -217,11 +218,12 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             $26, $27, $28,
             $29, $30,
             $31, $32,
+            $33,
             COALESCE(
                 (SELECT scraped_at FROM repositories WHERE id = $1),
-                $33::TIMESTAMPTZ
+                $34::TIMESTAMPTZ
             ),
-            $33::TIMESTAMPTZ
+            $34::TIMESTAMPTZ
         )
         """,
         [
@@ -257,6 +259,7 @@ def upsert_repository(conn: duckdb.DuckDBPyConnection, repo: RepositoryModel) ->
             repo.releases_count,
             repo.latest_release_tag,
             repo.latest_release_at.isoformat() if repo.latest_release_at else None,
+            repo.etag,
             now,
         ],
     )
@@ -328,6 +331,38 @@ def get_repo_freshness(
     if row is None:
         return None
     return (row[0], row[1])
+
+
+def get_repo_volatile_stats(
+    conn: duckdb.DuckDBPyConnection,
+    repo_id: str,
+) -> dict[str, Any] | None:
+    """Return specific volatile stats for an existing repository.
+
+    Used by Flow B to perform low-cost comparisons against GraphQL nodes
+    without requiring the full repository model.
+
+    Args:
+        conn: An open DuckDB connection.
+        repo_id: The GitHub node ID.
+
+    Returns:
+        A dictionary containing ``stars``, ``forks``, ``open_issues``,
+        ``pushed_at``, and ``etag``, or ``None`` if it doesn't exist.
+    """
+    row = conn.execute(
+        "SELECT stars, forks, open_issues, pushed_at, etag FROM repositories WHERE id = $1",
+        [repo_id],
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "stars": row[0],
+        "forks": row[1],
+        "open_issues": row[2],
+        "pushed_at": row[3],
+        "etag": row[4],
+    }
 
 
 def lightweight_update_repo(

@@ -39,6 +39,7 @@ from github_scout.crawler.query_slicer import generate_query_slices
 from github_scout.database.connection import get_connection
 from github_scout.database.dao import (
     get_repo_freshness,
+    get_repo_volatile_stats,
     insert_crawl_run,
     insert_snapshot,
     lightweight_update_repo,
@@ -321,30 +322,37 @@ async def run_crawl(
                             repos_fresh: list[RepositoryModel] = []
 
                             for repo in repos:
-                                freshness = get_repo_freshness(conn, repo.id)
-                                if freshness is None:
+                                db_stats = get_repo_volatile_stats(conn, repo.id)
+                                if db_stats is None:
                                     # CASE A — NEW
                                     repos_to_enrich.append(repo)
                                 elif force_refresh:
                                     # Force refresh overrides TTL
+                                    repo.etag = db_stats.get("etag")
                                     repos_to_enrich.append(repo)
                                 else:
-                                    updated_in_db_at = freshness[0]
-                                    if updated_in_db_at is not None:
-                                        age_hours = (
-                                            now_utc - updated_in_db_at.replace(
-                                                tzinfo=timezone.utc,
-                                            )
-                                        ).total_seconds() / 3600
-                                    else:
-                                        age_hours = float("inf")
+                                    # CASE B — EXISTING REPO (Check for changes natively)
+                                    db_stars = db_stats.get("stars", 0)
+                                    db_forks = db_stats.get("forks", 0)
+                                    db_issues = db_stats.get("open_issues", 0)
+                                    db_pushed = db_stats.get("pushed_at")
+                                    
+                                    db_pushed_tz = db_pushed.replace(tzinfo=timezone.utc) if db_pushed else None
+                                    repo_pushed_tz = repo.pushed_at.replace(tzinfo=timezone.utc) if repo.pushed_at else None
 
-                                    if age_hours >= refresh_ttl:
-                                        # CASE B — STALE
-                                        repos_to_enrich.append(repo)
-                                    else:
-                                        # CASE C — FRESH
+                                    changed = (
+                                        repo.stars != db_stars or 
+                                        repo.forks != db_forks or 
+                                        repo.open_issues != db_issues or 
+                                        repo_pushed_tz != db_pushed_tz
+                                    )
+
+                                    if changed:
+                                        repo.etag = db_stats.get("etag")
                                         repos_fresh.append(repo)
+                                    else:
+                                        # CASE C — NO CHANGE, IGNORE COMPLETELY!
+                                        pass
 
                             # ── Enrich only repos that need it ───────────
                             if repos_to_enrich:

@@ -13,9 +13,9 @@ GitHub Scout crawls GitHub's GraphQL & REST APIs, persists structured repository
 - **REST enrichment** — README quality analysis, contributor counts, release metadata
 - **DuckDB persistence** — embedded columnar database with historical snapshots
 - **Polars scoring pipeline** — multi-factor composite score (0–100) combining star velocity, recency, activity, README quality, and 7-day momentum
-- **Typer CLI** — 6 commands: `crawl`, `score`, `top`, `stats`, `export`, `clean`
+- **Typer CLI** — 7 commands: `crawl`, `poll`, `score`, `top`, `stats`, `export`, `clean`
 - **Database maintenance** — flexible `clean` command to purge stale, low-score, archived, or forked repos with dry-run preview
-- **Smart re-crawl** — TTL-based three-tier strategy: skip enrichment for fresh repos, re-enrich stale ones, and always insert new repos; saves API quota dramatically
+- **Smart re-crawl & polling** — ETag/Conditional cache parsing & pure-GraphQL lightweight updates for identical records. Saves REST and GraphQL API quotas dramatically.
 - **Incremental updates** — delta scraping with upsert logic, preserving original scrape timestamps
 - **Smart rate-limit handling** — aligned with GitHub's official API policies for both primary and secondary limits
 - **Live progress panel** — real-time Rich dashboard showing pages, repos, quotas, and elapsed time
@@ -124,27 +124,40 @@ On re-crawl, each repository is classified into one of three tiers:
 | Tier | Condition | Action | REST calls |
 |---|---|---|---|
 | **🆕 NEW** | Not in DB | Full enrichment + insert + snapshot | ✅ Yes |
-| **🔄 REFRESH** | In DB, older than `REFRESH_TTL_HOURS` | Full re-enrichment + upsert + snapshot | ✅ Yes |
-| **⏩ SKIP-ENRICH** | In DB, fresher than `REFRESH_TTL_HOURS` | Lightweight update (stars, forks, issues only) + conditional snapshot | ❌ No |
+| **🔄 REFRESH** | In DB, but Native GraphQL stats (stars, hooks, pushed) changed | Lightweight update (volatile stats only) | ❌ No |
+| **⏩ SKIP-ENRICH** | In DB, Native GraphQL stats identical | Scanned but completely bypassed | ❌ No |
 
 Snapshots in the SKIP-ENRICH tier are only taken if the last snapshot is older than `SNAPSHOT_TTL_HOURS`, avoiding snapshot spam.
 
 Use `--force-refresh` to override TTL and re-enrich all repos.
 
-### 2. Compute scores
+### 2. Poll Known Repositories
+
+Routinely poll the oldest updated repositories in the database using HTTP ETags (`If-None-Match`).
+If the GitHub REST API validates the ETag (`304 Not Modified`), the API token cost is entirely bypassed.
+
+```bash
+# Poll 100 repositories by default
+github-scout poll
+
+# Poll a specific limit of repositories
+github-scout poll --limit 500
+```
+
+### 3. Compute scores
 
 ```bash
 github-scout score
 ```
 
-### 3. View top repositories
+### 4. View top repositories
 
 ```bash
 github-scout top
 github-scout top --limit 50
 ```
 
-### 4. View analytics
+### 5. View analytics
 
 ```bash
 github-scout stats
@@ -157,7 +170,7 @@ Displays:
 - Score distribution histogram
 - 7-day trending repos
 
-### 5. Export data
+### 6. Export data
 
 ```bash
 # CSV
@@ -167,7 +180,7 @@ github-scout export -o results.csv
 github-scout export -o results.parquet
 ```
 
-### 6. Clean / purge data
+### 7. Clean / purge data
 
 Remove stale or unwanted repositories from the database. **Dry-run is ON by default** — no data is modified until you pass `--execute`.
 

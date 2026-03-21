@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS repositories (
     HG_score              DOUBLE,
     age_tier              VARCHAR,
     maturity_tier         VARCHAR,
+    etag                  VARCHAR,
     scraped_at            TIMESTAMPTZ DEFAULT current_timestamp,
     updated_in_db_at      TIMESTAMPTZ DEFAULT current_timestamp
 );
@@ -88,6 +89,7 @@ _REPOSITORIES_MIGRATIONS: list[str] = [
     "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS maturity_tier VARCHAR",
     "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS closed_issues INTEGER DEFAULT 0",
     "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS HG_score DOUBLE",
+    "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS etag VARCHAR",
 ]
 
 _CRAWL_RUNS_MIGRATIONS: list[str] = [

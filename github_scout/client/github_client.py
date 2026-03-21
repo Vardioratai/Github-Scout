@@ -142,6 +142,7 @@ class GitHubClient:
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        etag: str | None = None,
     ) -> httpx.Response:
         """Perform an authenticated GET against the GitHub REST v3 API.
 
@@ -149,15 +150,22 @@ class GitHubClient:
             path: URL path relative to ``rest_base_url`` (e.g.
                 ``/repos/owner/repo/readme``).
             params: Optional query-string parameters.
+            etag: Optional ETag for conditional requests.
 
         Returns:
             The full ``httpx.Response``.
 
         Raises:
-            httpx.HTTPStatusError: Propagated after retry exhaustion.
+            httpx.HTTPStatusError: Propagated after retry exhaustion (not raised for 304).
         """
         url = f"{self._settings.rest_base_url}{path}"
-        resp = await self._client.get(url, params=params)
+        headers = {}
+        if etag:
+            headers["If-None-Match"] = etag
+            
+        resp = await self._client.get(url, params=params, headers=headers)
         await check_rate_limit(resp)
+        if resp.status_code == 304:
+            return resp
         resp.raise_for_status()
         return resp
